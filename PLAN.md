@@ -13,7 +13,6 @@
 ### 当前进行中
 
 - 将 6 份项目文档（PROJECT / PLAN / STATUS / DECISIONS / RISKS / CHANGELOG）提交并推送到远端 `origin`（YOGEMOW/LimitRSS）。
-- 推送后向用户说明如何向原项目（Demisse233/LimitRSS）发起 Pull Request。
 
 ### 后续待办
 
