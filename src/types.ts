@@ -10,6 +10,8 @@ export interface Category {
 export interface Subscription {
     id: ID; url: string; name: string; categoryId?: ID; categoryName?: string;
     siteUrl?: string; description?: string; favicon?: string;
+    /** 用户手动设置的图标（图片 URL / dataURL / emoji），优先级高于自动抓取 */
+    customFavicon?: string;
     /** 上次尝试自动抓站点 favicon 的时间戳，用于 7 天退避 */
     faviconTriedAt?: number;
     enabled: boolean; errorCount: number; sortOrder: number;
@@ -42,6 +44,17 @@ export interface AIResult {
     generatedAt: number; durationMs: number; streamed?: boolean;
 }
 
+/** AI 日报缓存（按日期） */
+export interface DailyReportCache {
+    markdown: string;
+    articleIds: string[];
+    generatedAt: number;
+    providerId?: string;
+    model?: string;
+    /** 生成时选定的订阅源范围：[] 或缺失 = 全部，元素 cat:xxx / sub:xxx */
+    scope?: string[];
+}
+
 export type AIProviderType = "openai" | "anthropic" | "deepseek" | "zhipu" | "groq" | "ollama" | "custom";
 
 export interface AIProvider {
@@ -66,10 +79,10 @@ export interface AISettings {
 }
 
 export interface Settings {
-    general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; rsshubCustomInstances?: string[]; };
+    general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; rsshubCustomInstances?: string[]; entryPosition?: "topbar-right" | "topbar-left" | "dock-left-top" | "dock-right-top" | "hidden"; };
     display: { fontSize: number; lineHeight: number; theme: string; };
-    reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; };
-    save: { template: string; includeSourceLink: boolean; downloadImages: boolean; };
+    reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; selection?: { copy?: boolean; translate?: boolean; search?: boolean; customUrl?: string; }; };
+    save: { template: string; includeSourceLink: boolean; downloadImages: boolean; defaultNotebook?: string; folderTemplate?: string; pathsByNotebook?: Record<string, string>; };
 }
 
 // 持久化 key
@@ -81,6 +94,7 @@ export const KEYS = {
     star: "ai_rss_star",
     settings: "ai_rss_settings",
     ai: "ai_rss_ai",
+    dailyReports: "ai_rss_daily_reports",
 } as const;
 
 // 默认值
@@ -109,6 +123,7 @@ export const DEFAULT_SETTINGS: Settings = {
     save: {
         template: "---\ncustom-ai-rss-source: {{source}}\ncustom-ai-rss-link: {{link}}\n---\n\n# {{title}}\n\n> {{source}} · {{date}} · [原文]({{link}})\n\n{{content}}",
         includeSourceLink: true, downloadImages: true,
+        defaultNotebook: "", folderTemplate: "",
     },
 };
 

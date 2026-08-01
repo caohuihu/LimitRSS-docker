@@ -4,12 +4,14 @@
 
 import { el, clear, iconLabel } from "./ui";
 import { modal, button, toast } from "./components";
-import { icon as makeIcon } from "./icons";
+import { icon as makeIcon, renderFavicon } from "./icons";
+import { fetchSyncPost } from "siyuan";
 import { Storage } from "./storage";
 import { AIService } from "./ai";
 import { AIProvider, DEFAULT_PROMPTS, PromptTemplate, Subscription } from "./types";
 import { applyDisplaySettings } from "./theme";
 import { fetchAndParse, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
+import { openFaviconDialog } from "./favicon";
 
 const GENERIC_PROVIDER = {
     endpoint: "https://api.openai.com/v1",
@@ -48,6 +50,7 @@ export function openSettings(storage: Storage, ai: AIService) {
     root.appendChild(main);
 
     const render = () => {
+        const navScrollLeft = sidebar.scrollLeft;
         clear(sidebar);
         clear(main);
         main.classList.toggle("ar-settings__main--subscriptions", active === "subscriptions");
@@ -108,6 +111,8 @@ export function openSettings(storage: Storage, ai: AIService) {
             case "prompts": renderPrompts(main, storage); break;
             case "about": renderAbout(main); break;
         }
+        // 手机端横向导航：切换分类后保留滚动位置，不跳回最左边
+        requestAnimationFrame(() => { sidebar.scrollLeft = navScrollLeft; });
     };
 
     let dialog: ReturnType<typeof modal>;
@@ -270,6 +275,16 @@ function renderGeneral(main: HTMLElement, s: Storage) {
     ], (v) => updateGeneral({ language: v }))));
     wrap.appendChild(formRow("每页文章数", numberInput(settings.general.articlesPerPage, (v) => updateGeneral({ articlesPerPage: v }))));
     wrap.appendChild(formRow("自动刷新间隔（分钟，0=关）", numberInput(settings.general.autoRefresh, (v) => updateGeneral({ autoRefresh: v }))));
+    wrap.appendChild(formRow("入口位置", select(settings.general.entryPosition || "topbar-right", [
+        { value: "topbar-right", label: "顶栏右侧（默认）" },
+        { value: "topbar-left", label: "顶栏左侧" },
+        { value: "dock-left-top", label: "左侧 dock（重载后生效）" },
+        { value: "dock-right-top", label: "右侧 dock（重载后生效）" },
+        { value: "hidden", label: "隐藏按钮" },
+    ], (v) => {
+        updateGeneral({ entryPosition: v as any });
+        (window as any).__ai_rss__?.applyEntry?.();
+    })));
     const renderRSSHubInstances = () => {
         clear(main);
         renderGeneral(main, s);
@@ -435,7 +450,7 @@ function renderSubscriptions(
             ]),
         ]);
         if (group.subs.length) {
-            group.subs.forEach((sub) => block.appendChild(renderSubscriptionManageRow(sub, selected, validationResults, rerender)));
+            group.subs.forEach((sub) => block.appendChild(renderSubscriptionManageRow(s, sub, selected, validationResults, rerender)));
         } else {
             block.appendChild(el("div", { class: "ar-sub-manage__empty" }, ["暂无订阅源"]));
         }
@@ -445,19 +460,9 @@ function renderSubscriptions(
     main.appendChild(wrap);
 }
 
-function renderSubscriptionManageRow(sub: Subscription, selected: Set<string>, validationResults: Map<string, SubValidationResult>, rerender: () => void) {
-    const logoUrl = sub.favicon || fallbackFavicon(sub.siteUrl || sub.url);
-    const logo = el("span", { class: "ar-sub-manage__logo" });
-    if (logoUrl) {
-        const img = el("img", { src: logoUrl, alt: "", loading: "lazy" }) as HTMLImageElement;
-        img.addEventListener("error", () => {
-            clear(logo);
-            logo.appendChild(makeIcon("rss", 13));
-        }, { once: true });
-        logo.appendChild(img);
-    } else {
-        logo.appendChild(makeIcon("rss", 13));
-    }
+function renderSubscriptionManageRow(s: Storage, sub: Subscription, selected: Set<string>, validationResults: Map<string, SubValidationResult>, rerender: () => void) {
+    const logoUrl = sub.customFavicon || sub.favicon || fallbackFavicon(sub.siteUrl || sub.url);
+    const logo = renderFavicon(logoUrl, "ar-sub-manage__logo", 13);
     const validation = validationResults.get(sub.id);
     const stateText = validation?.status === "testing" ? "检测中"
         : validation?.status === "invalid" ? "失效"
@@ -479,6 +484,7 @@ function renderSubscriptionManageRow(sub: Subscription, selected: Set<string>, v
             el("div", { class: "ar-sub-manage__url" }, [sub.url]),
             validation?.status === "invalid" && validation.message ? el("div", { class: "ar-sub-manage__error" }, [validation.message]) : null,
         ]),
+        button({ variant: "ghost", size: "xs", icon: "image", title: "设置图标", onclick: () => openFaviconDialog(s, sub, rerender) }),
         el("span", { class: `ar-sub-manage__state ${stateClass}` }, [stateText]),
     ].filter(Boolean) as HTMLElement[]);
 }
@@ -487,6 +493,28 @@ function renderSave(main: HTMLElement, s: Storage) {
     const wrap = el("div", { class: "ar-settings__section" });
     const settings = s.getSettings();
     wrap.appendChild(sectionTitle("保存到思源"));
+    const notebookSelect = el("select", { class: "ar-input" }) as HTMLSelectElement;
+    notebookSelect.appendChild(el("option", { value: "" }, ["跟随保存对话框默认"]));
+    fetchSyncPost("/api/notebook/lsNotebooks", {}).then((r: any) => {
+        if (r.code === 0 && r.data?.notebooks) {
+            const list = (r.data.notebooks as { id: string; name: string; closed?: boolean }[]).filter((n) => !n.closed);
+            list.forEach((n) => notebookSelect.appendChild(el("option", {
+                value: n.id,
+                selected: n.id === settings.save.defaultNotebook,
+            }, [n.name])));
+        }
+    }).catch(() => { /* ignore */ });
+    notebookSelect.addEventListener("change", () => {
+        s.updateSettings({ save: { ...s.getSettings().save, defaultNotebook: notebookSelect.value } });
+    });
+    wrap.appendChild(formRow("默认笔记本", notebookSelect));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["未设置时保存对话框默认选第一个笔记本"]));
+    const folderInput = el("input", { class: "ar-input", type: "text", value: settings.save.folderTemplate || "", placeholder: "如 RSS/{{source}}/{{date}}" }) as HTMLInputElement;
+    folderInput.addEventListener("change", debounce(() => {
+        s.updateSettings({ save: { ...s.getSettings().save, folderTemplate: folderInput.value } });
+    }, 400));
+    wrap.appendChild(formRow("默认保存路径（目录模板）", folderInput));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["可用变量：{{source}} {{category}} {{date}} {{year}} {{month}}；留空保存到笔记本根目录"]));
     const ta = el("textarea", { class: "ar-input", rows: 8, style: { fontFamily: "var(--b3-font-family-code)", fontSize: "12px" } }, [settings.save.template]) as HTMLTextAreaElement;
     ta.addEventListener("change", debounce(() => s.updateSettings({ save: { ...settings.save, template: ta.value } }), 400));
     wrap.appendChild(formRow("Markdown 模板", ta));
