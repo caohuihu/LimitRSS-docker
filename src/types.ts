@@ -1,6 +1,17 @@
 // 核心类型
+import { DEFAULT_DAILY_REPORT } from "./dailyReportCore";
+
 export type ID = string;
 export type Timestamp = number;
+
+export type DailyReportMode = "fast" | "balanced" | "comprehensive";
+
+export interface DailyReportSettings {
+    mode?: DailyReportMode;
+    topN?: number;
+    batchSize?: number;
+    concurrency?: number;
+}
 
 export interface Category {
     id: ID; name: string; color?: string;
@@ -53,6 +64,18 @@ export interface DailyReportCache {
     model?: string;
     /** 生成时选定的订阅源范围：[] 或缺失 = 全部，元素 cat:xxx / sub:xxx */
     scope?: string[];
+    /** 两阶段日报：覆盖模式 */
+    mode?: DailyReportMode;
+    /** 文章集合哈希，用于组件缓存命中判断 */
+    articleHash?: string;
+    /** 阶段一全景速览文本 */
+    panorama?: string;
+    /** 阶段二选中的重点文章 ID */
+    selectedIds?: string[];
+    /** 单篇深读结果缓存 */
+    deepDives?: Record<string, string>;
+    /** 缓存结构版本 */
+    version?: number;
 }
 
 export type AIProviderType = "openai" | "anthropic" | "deepseek" | "zhipu" | "groq" | "ollama" | "custom";
@@ -76,6 +99,8 @@ export interface AISettings {
     prompts: PromptTemplate[];
     enableCache: boolean;
     stream: boolean;
+    /** AI 日报两阶段生成配置 */
+    daily?: DailyReportSettings;
 }
 
 export interface Settings {
@@ -134,6 +159,7 @@ export const DEFAULT_AI: AISettings = {
     prompts: DEFAULT_PROMPTS,
     enableCache: true,
     stream: true,
+    daily: { ...DEFAULT_DAILY_REPORT },
 };
 
 // 精选订阅源（原创）

@@ -9,6 +9,7 @@ import { fetchSyncPost } from "siyuan";
 import { Storage } from "./storage";
 import { AIService } from "./ai";
 import { AIProvider, DEFAULT_PROMPTS, PromptTemplate, Subscription } from "./types";
+import { DEFAULT_DAILY_REPORT, type DailyReportMode, type DailyReportSettings } from "./dailyReportCore";
 import { applyDisplaySettings } from "./theme";
 import { fetchAndParse, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
 import { openFaviconDialog } from "./favicon";
@@ -565,6 +566,33 @@ function renderAI(main: HTMLElement, s: Storage, ai: AIService) {
             renderAI(main, s, ai);
         } }),
     ]));
+    // AI 日报两阶段生成配置
+    wrap.appendChild(sectionTitle("AI 日报"));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["两阶段生成：先全量扫描当天文章元数据，再对重点文章分批深读，兼顾速度与全面。"]));
+    const daily: DailyReportSettings = { ...DEFAULT_DAILY_REPORT, ...(aiSettings.daily || {}) };
+    const updateDaily = (patch: Partial<DailyReportSettings>) => {
+        s.updateAI({ daily: { ...daily, ...patch } });
+        ai.update(s.getAI());
+        renderAI(main, s, ai);
+    };
+    const modeSelect = el("select", { class: "ar-input" }) as HTMLSelectElement;
+    ([
+        ["fast", "快速（仅标题级全景）"],
+        ["balanced", "均衡（全景 + 重点深读）"],
+        ["comprehensive", "全面（全景 + 更大范围深读）"],
+    ] as [DailyReportMode, string][]).forEach(([v, label]) => {
+        modeSelect.appendChild(el("option", { value: v, selected: daily.mode === v }, [label]));
+    });
+    modeSelect.addEventListener("change", () => updateDaily({ mode: modeSelect.value as DailyReportMode }));
+    wrap.appendChild(formRow("覆盖模式", modeSelect));
+    if (daily.mode !== "fast") {
+        wrap.appendChild(formRow("重点深读数量", numberInput(daily.topN ?? 30, (v) => updateDaily({ topN: Math.max(1, Math.min(300, Math.floor(v) || 30)) }))));
+        wrap.appendChild(formRow("每批深读篇数", numberInput(daily.batchSize ?? 10, (v) => updateDaily({ batchSize: Math.max(1, Math.min(50, Math.floor(v) || 10)) }))));
+        wrap.appendChild(formRow("并发请求数", numberInput(daily.concurrency ?? 2, (v) => updateDaily({ concurrency: Math.max(1, Math.min(8, Math.floor(v) || 2)) }))));
+        wrap.appendChild(el("div", { class: "ar-form__hint" }, ["并发过高可能触发提供商限流；每批篇数影响单次请求长度。"]));
+    } else {
+        wrap.appendChild(el("div", { class: "ar-form__hint" }, ["快速模式仅生成标题级全景速览，不进行重点深读。"]));
+    }
     main.appendChild(wrap);
 }
 

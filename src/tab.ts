@@ -8,7 +8,8 @@ import { icon as makeIcon, renderFavicon } from "./icons";
 import { button, dropdown, DropdownItem, toast, modal, empty, spinner } from "./components";
 import { Storage } from "./storage";
 import { AIService } from "./ai";
-import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category } from "./types";
+import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category, DailyReportSettings } from "./types";
+import { DEFAULT_DAILY_REPORT, articleSetHash, buildDeepDiveBatches, buildDeepDivePrompt, buildPanoramaPrompt, composeFinalReport, mapBatchCitations, runWithConcurrency, selectTopArticles, splitPanoramaArticles, type DeepBatchResult, type DeepDiveArticle } from "./dailyReportCore";
 import { fetchAndParse, resolveSubscriptionFavicon, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
 import { fetchFullText } from "./fulltext";
 import { renderFolderTemplate, saveMarkdownToSiyuan, saveToSiyuan } from "./save";
@@ -1676,6 +1677,7 @@ class Reader {
     contentArea: HTMLElement | null = null;
     dailyDate = "";
     dailyReport = "";
+    dailyProgress = "";
     dailyReportDate = "";
     dailyArticleIds: string[] = [];
     dailyLoading = false;
@@ -1976,7 +1978,7 @@ class Reader {
                                 el("span"), el("span"), el("span"),
                             ]),
                         ]),
-                        el("div", { class: "ar-daily-generating__desc" }, [`正在整理 ${articles.length} 篇文章，生成内容将实时呈现`]),
+                        el("div", { class: "ar-daily-generating__desc" }, [this.dailyProgress || `正在整理 ${articles.length} 篇文章，生成内容将实时呈现`]),
                     ]),
                 ]),
                 streaming ? null : el("div", { class: "ar-daily-generating__skeleton", "aria-hidden": "true" }, [
@@ -2083,37 +2085,6 @@ class Reader {
         return cat?.name || "未分类";
     }
 
-    private buildDailyPrompt(date: string, articles: Article[]): string {
-        const MAX_DAILY_ARTICLES = 40;
-        const capped = articles.slice(0, MAX_DAILY_ARTICLES);
-        const lines = capped.map((a, index) => {
-            const sub = this.storage.getSub(a.subscriptionId);
-            const text = htmlToPlainText(a.description || a.content || "").slice(0, 320);
-            return [
-                `编号：${index + 1}`,
-                `分类：${this.dailyCategoryName(a)}`,
-                `来源：${sub?.name || "未知来源"}`,
-                `标题：${a.title || "(无标题)"}`,
-                `摘要：${text}`,
-            ].join("\n");
-        }).join("\n\n");
-        const omitted = articles.length > capped.length
-            ? `\n\n（当日共 ${articles.length} 篇，仅列出前 ${capped.length} 篇，其余省略）`
-            : "";
-        return [
-            `请基于 ${displayDate(date)} 的 RSS 文章生成中文 AI 日报。`,
-            "要求：",
-            "1. 按分类组织内容，每个分类给出 2-4 句总览。",
-            "2. 先给出「今日速览」，再给出「分类总结」。",
-            "3. 不要编造文章之外的信息。",
-            "4. 每个关键判断、趋势或总结句后面必须直接标注对应文章编号，例如 [1]、[2][5]；不要把链接或编号集中放到最后。",
-            "5. 输出 Markdown。",
-            "",
-            omitted,
-            lines,
-        ].join("\n");
-    }
-
     private linkDailyCitations(markdown: string, articles: (Article | undefined)[]): string {
         return markdown
             .replace(/\[↗\]\(article:/g, "[↗︎](article:")
@@ -2123,6 +2094,49 @@ class Reader {
             const article = articles[index - 1];
             if (!article) return match;
             return `[↗︎](article:${article.id})`;
+        });
+    }
+
+    private dailyReportConfig(): Required<DailyReportSettings> {
+        const d = this.ai.settings.daily || {};
+        return {
+            mode: d.mode || DEFAULT_DAILY_REPORT.mode,
+            topN: d.topN ?? DEFAULT_DAILY_REPORT.topN,
+            batchSize: d.batchSize ?? DEFAULT_DAILY_REPORT.batchSize,
+            concurrency: d.concurrency ?? DEFAULT_DAILY_REPORT.concurrency,
+        };
+    }
+
+    /** 单次日报调用：流式优先，空结果降级为非流式重试一次 */
+    private async callDailyOnce(
+        fakeArticle: Article,
+        tpl: PromptTemplate,
+        prompt: string,
+        signal: AbortSignal,
+        onChunk?: (chunk: string) => void,
+    ): Promise<string> {
+        return new Promise<string>((resolve, reject) => {
+            let full = "";
+            this.ai.streamRenderedTemplate(fakeArticle, tpl, prompt, {
+                onChunk: (chunk) => {
+                    full += chunk;
+                    onChunk?.(chunk);
+                },
+                onDone: async (final) => {
+                    if (final || full) {
+                        resolve(final || full);
+                        return;
+                    }
+                    try {
+                        const fallback = await this.ai.chatRendered(tpl, prompt);
+                        resolve(fallback?.content || "");
+                    } catch (e) {
+                        reject(e);
+                    }
+                },
+                onError: (err) => reject(err),
+                signal,
+            }).catch(reject);
         });
     }
 
@@ -2137,10 +2151,14 @@ class Reader {
             toast("请先在设置中配置 AI 提供商", "error", 5000);
             return;
         }
-        const cached = this.storage.getDailyReport(date);
+        const cfg = this.dailyReportConfig();
+        const hash = articleSetHash(articles);
         const scopeKey = scope.slice().sort().join("|");
+        const cached = this.storage.getDailyReport(date);
         const cachedKey = Array.isArray(cached?.scope) ? cached.scope.slice().sort().join("|") : "";
-        if (cached?.markdown && !options.force && cachedKey === scopeKey) {
+        const needDeep = cfg.mode !== "fast";
+        // 1) 最终日报完整命中
+        if (cached?.markdown && !options.force && cachedKey === scopeKey && cached.mode === cfg.mode && cached.articleHash === hash) {
             this.dailyDate = date;
             this.dailyReportDate = date;
             this.dailyArticleIds = cached.articleIds || articles.map((article) => article.id);
@@ -2149,84 +2167,159 @@ class Reader {
             this.render();
             return;
         }
+        // 2) 组件缓存命中：全景 + 选中列表 + 深读齐全
+        const selectedIds = Array.isArray(cached?.selectedIds) ? cached.selectedIds : [];
+        const deepComplete = !needDeep || (
+            selectedIds.length > 0 &&
+            selectedIds.every((id) => Boolean(cached?.deepDives?.[id]))
+        );
+        if (cached?.panorama && cached.mode === cfg.mode && cached.articleHash === hash && deepComplete) {
+            const selected = selectedIds
+                .map((id) => articles.find((a) => a.id === id))
+                .filter(Boolean) as Article[];
+            const batches = buildDeepDiveBatches(selected, cfg.batchSize);
+            const deepBatches: DeepBatchResult[] = needDeep
+                ? batches.map((b) => ({
+                    articles: b,
+                    markdown: b.map((a) => cached!.deepDives![a.id] || "").join("\n\n"),
+                }))
+                : [];
+            this.dailyDate = date;
+            this.dailyReportDate = date;
+            this.dailyArticleIds = articles.map((article) => article.id);
+            this.dailyReport = composeFinalReport(cached.panorama, deepBatches);
+            this.dailyLoading = false;
+            this.render();
+            return;
+        }
+        // 3) 全量生成（两阶段）
         this.dailyDate = date;
         this.dailyReportDate = date;
         this.dailyArticleIds = articles.map((article) => article.id);
         this.dailyLoading = true;
         this.dailyReport = "";
+        this.dailyProgress = "";
         this.render();
         const abort = new AbortController();
         this.dailyAbort?.abort();
         this.dailyAbort = abort;
+        const dailyPrompt = { ...DAILY_REPORT_PROMPT, ...(this.ai.getPrompt(DAILY_REPORT_PROMPT.id) || {}) };
+        const fakeArticle = {
+            id: `daily_${date}`,
+            subscriptionId: "",
+            title: `${displayDate(date)} AI 日报`,
+            link: "",
+            pubDate: Date.now(),
+            fetchedAt: Date.now(),
+            content: "",
+            description: "",
+            isRead: true,
+            isStarred: false,
+        } as Article;
         try {
-            let full = "";
-            const fakeArticle = {
-                id: `daily_${date}`,
-                subscriptionId: "",
-                title: `${displayDate(date)} AI 日报`,
-                link: "",
-                pubDate: Date.now(),
-                fetchedAt: Date.now(),
-                content: "",
-                description: "",
-                isRead: true,
-                isStarred: false,
-            } as Article;
-            const dailyPrompt = { ...DAILY_REPORT_PROMPT, ...(this.ai.getPrompt(DAILY_REPORT_PROMPT.id) || {}) };
-            await this.ai.streamRenderedTemplate(fakeArticle, dailyPrompt, this.buildDailyPrompt(date, articles), {
-                onChunk: (chunk) => {
-                    full += chunk;
-                    this.dailyReport = full;
+            // 阶段一：全景扫描（超长自动分块）
+            const meta = articles.map((a) => ({
+                id: a.id,
+                title: a.title || "",
+                source: this.storage.getSub(a.subscriptionId)?.name || "未知",
+                category: this.dailyCategoryName(a),
+            }));
+            const chunks = splitPanoramaArticles(meta);
+            const panoramaParts: string[] = [];
+            const picked: Article[] = [];
+            for (let ci = 0; ci < chunks.length; ci++) {
+                if (abort.signal.aborted) return;
+                this.dailyProgress = `阶段 1/2：全景扫描（${ci + 1}/${chunks.length} 块 · 共 ${articles.length} 篇）`;
+                this.render();
+                const { prompt } = buildPanoramaPrompt(date, chunks[ci]);
+                let part = "";
+                const text = await this.callDailyOnce(fakeArticle, dailyPrompt, prompt, abort.signal, (chunk) => {
+                    part += chunk;
+                    this.dailyReport = [...panoramaParts, part].join("\n\n---\n\n");
                     this.updateDailyReport();
-                },
-                onDone: async (final) => {
-                    this.dailyReport = final || full;
-                    if (!this.dailyReport || !this.dailyReport.trim()) {
-                        // 流式结果为空时降级为非流式重试一次
-                        try {
-                            const fallback = await this.ai.chatRendered(dailyPrompt, this.buildDailyPrompt(date, articles));
-                            this.dailyReport = fallback?.content || "";
-                        } catch (e) {
-                            console.warn("[ai-rss] daily non-stream fallback failed", e);
-                        }
-                    }
+                });
+                if (!text.trim()) {
+                    this.dailyReport = "生成失败：全景扫描未返回内容";
                     this.dailyLoading = false;
                     this.dailyAbort = null;
-                    if (!this.dailyReport || !this.dailyReport.trim()) {
-                        this.dailyReport = "生成结果为空，请重新生成（AI 未返回任何内容）";
-                    }
+                    this.dailyProgress = "";
                     this.render();
-                    const provider = this.ai.defaultProvider();
-                    this.storage.saveDailyReport(date, {
-                        markdown: this.dailyReport,
-                        articleIds: this.dailyArticleIds,
-                        generatedAt: Date.now(),
-                        providerId: provider?.id,
-                        model: provider?.model,
-                        scope,
-                    }).catch((e) => console.error("[ai-rss] save daily report", e));
-                },
-                onError: (err) => {
-                    this.dailyLoading = false;
-                    this.dailyAbort = null;
-                    if (abort.signal.aborted || err.name === "AbortError") {
-                        if (!this.dailyReport) this.dailyReport = "已停止生成";
-                        toast("已停止生成", "info", 2000);
-                    } else {
-                        this.dailyReport = `生成失败：${err.message}`;
-                        toast("AI 日报生成失败：" + err.message, "error", 5000);
-                    }
+                    return;
+                }
+                panoramaParts.push(text.trim());
+                this.dailyReport = panoramaParts.join("\n\n---\n\n");
+                this.render();
+                selectTopArticles(text, chunks[ci], cfg.topN).forEach((m) => {
+                    const a = articles.find((x) => x.id === m.id);
+                    if (a && !picked.some((x) => x.id === a.id)) picked.push(a);
+                });
+            }
+            const panorama = panoramaParts.join("\n\n---\n\n");
+            // 阶段二：重点文章分批深读（受限并发）
+            let deepBatches: DeepBatchResult[] = [];
+            const skipped: string[] = [];
+            if (needDeep && picked.length) {
+                const batches = buildDeepDiveBatches(picked, cfg.batchSize);
+                const results = await runWithConcurrency(batches, cfg.concurrency, async (batch, bi) => {
+                    if (abort.signal.aborted) throw new Error("AbortError");
+                    this.dailyProgress = `阶段 2/2：深读重点文章 ${bi + 1}/${batches.length}（共 ${picked.length} 篇）`;
                     this.render();
-                },
-                signal: abort.signal,
-            });
+                    const deepBatch: DeepDiveArticle[] = batch.map((a) => ({
+                        id: a.id,
+                        title: a.title || "",
+                        source: this.storage.getSub(a.subscriptionId)?.name || "未知",
+                        category: this.dailyCategoryName(a),
+                        link: a.link || "",
+                        description: a.description || a.content || "",
+                    }));
+                    let text = "";
+                    try {
+                        text = await this.callDailyOnce(fakeArticle, dailyPrompt, buildDeepDivePrompt(date, deepBatch, bi), abort.signal);
+                    } catch (e) {
+                        if (abort.signal.aborted) throw e;
+                        skipped.push(...batch.map((a) => a.id));
+                        return { articles: batch, markdown: "" };
+                    }
+                    if (!text.trim()) {
+                        skipped.push(...batch.map((a) => a.id));
+                        return { articles: batch, markdown: "" };
+                    }
+                    return { articles: batch, markdown: mapBatchCitations(text.trim(), batch) };
+                });
+                deepBatches = results;
+            }
+            if (abort.signal.aborted) return;
+            this.dailyReport = composeFinalReport(panorama, deepBatches, { skipped });
+            if (!this.dailyReport.trim()) this.dailyReport = "生成结果为空，请重新生成（AI 未返回任何内容）";
+            this.dailyLoading = false;
+            this.dailyAbort = null;
+            this.dailyProgress = "";
+            this.render();
+            const provider = this.ai.defaultProvider();
+            this.storage.saveDailyReport(date, {
+                markdown: this.dailyReport,
+                articleIds: this.dailyArticleIds,
+                generatedAt: Date.now(),
+                providerId: provider?.id,
+                model: provider?.model,
+                scope,
+                mode: cfg.mode,
+                articleHash: hash,
+                panorama,
+                selectedIds: picked.map((a) => a.id),
+                deepDives: Object.fromEntries(deepBatches.flatMap((b) => b.articles.map((a) => [a.id, b.markdown]))),
+                version: 2,
+            }).catch((e) => console.error("[ai-rss] save daily report", e));
         } catch (e) {
             this.dailyLoading = false;
             this.dailyAbort = null;
+            this.dailyProgress = "";
             if (abort.signal.aborted || (e as Error).name === "AbortError") {
                 if (!this.dailyReport) this.dailyReport = "已停止生成";
+                toast("已停止生成", "info", 2000);
             } else {
                 this.dailyReport = `生成失败：${(e as Error).message}`;
+                toast("AI 日报生成失败：" + (e as Error).message, "error", 5000);
             }
             this.render();
         }
