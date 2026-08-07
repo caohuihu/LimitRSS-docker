@@ -20,12 +20,19 @@ const GENERIC_PROVIDER = {
     name: "通用 AI",
 };
 
+/** AI 日报各覆盖模式的介绍文案（随档位变化） */
+const DAILY_MODE_DESC: Record<DailyReportMode, string> = {
+    fast: "快速模式：仅生成标题级全景速览，不进行重点深读，速度最快、成本最低，适合快速浏览当天热点。",
+    balanced: "均衡模式：先全量扫描当天文章元数据，再对重点文章分批深读，兼顾速度与全面（默认推荐）。",
+    comprehensive: "全面模式：先全量扫描当天文章元数据，再对更大范围的重点文章分批深读，覆盖更全面，耗时与成本更高。",
+};
+
 const expandedProviders = new Set<string>();
 const providerModelOptions = new Map<string, string[]>();
 const LEGACY_PROVIDER_IDS = new Set(["p_openai", "p_deepseek", "p_zhipu", "p_ollama"]);
 const ACTIVE_PROMPT_IDS = new Set(DEFAULT_PROMPTS.map((p) => p.id));
 
-type Section = "general" | "display" | "reading" | "subscriptions" | "save" | "ai" | "prompts" | "about";
+type Section = "general" | "display" | "reading" | "subscriptions" | "save" | "ai" | "daily" | "prompts" | "about";
 type SubValidationResult = { status: "testing" | "ok" | "invalid"; message?: string; articleCount?: number };
 
 export function openSettings(storage: Storage, ai: AIService) {
@@ -40,6 +47,7 @@ export function openSettings(storage: Storage, ai: AIService) {
         { id: "subscriptions", label: "订阅源", icon: "rss" },
         { id: "save", label: "保存到思源", icon: "save" },
         { id: "ai", label: "AI 提供商", icon: "ai" },
+        { id: "daily", label: "AI 日报", icon: "article" },
         { id: "prompts", label: "提示词", icon: "fileText" },
         { id: "about", label: "关于", icon: "info" },
     ];
@@ -109,6 +117,7 @@ export function openSettings(storage: Storage, ai: AIService) {
             }); break;
             case "save": renderSave(main, storage); break;
             case "ai": renderAI(main, storage, ai); break;
+            case "daily": renderDailySettings(main, storage, ai); break;
             case "prompts": renderPrompts(main, storage); break;
             case "about": renderAbout(main); break;
         }
@@ -521,6 +530,8 @@ function renderSave(main: HTMLElement, s: Storage) {
     wrap.appendChild(formRow("Markdown 模板", ta));
     wrap.appendChild(el("div", { class: "ar-form__hint" }, ["可用变量：{{title}} {{author}} {{date}} {{link}} {{source}} {{content}} {{summary}} {{description}}"]));
     wrap.appendChild(formRow("包含原文链接", checkbox(settings.save.includeSourceLink, (v) => s.updateSettings({ save: { ...settings.save, includeSourceLink: v } }))));
+    wrap.appendChild(formRow("链接清理", checkbox(settings.save.cleanLinks !== false, (v) => s.updateSettings({ save: { ...s.getSettings().save, cleanLinks: v } }))));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["开启后导出正文将清理除原文链接外的网址链接（默认开启）。"]));
     wrap.appendChild(formRow("下载远程图片到本地", checkbox(settings.save.downloadImages, (v) => s.updateSettings({ save: { ...settings.save, downloadImages: v } }))));
     main.appendChild(wrap);
 }
@@ -566,15 +577,21 @@ function renderAI(main: HTMLElement, s: Storage, ai: AIService) {
             renderAI(main, s, ai);
         } }),
     ]));
-    // AI 日报两阶段生成配置
+    main.appendChild(wrap);
+}
+
+function renderDailySettings(main: HTMLElement, s: Storage, ai: AIService) {
+    clear(main);
+    const wrap = el("div", { class: "ar-settings__section" });
     wrap.appendChild(sectionTitle("AI 日报"));
-    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["两阶段生成：先全量扫描当天文章元数据，再对重点文章分批深读，兼顾速度与全面。"]));
+    const aiSettings = s.getAI();
     const daily: DailyReportSettings = { ...DEFAULT_DAILY_REPORT, ...(aiSettings.daily || {}) };
     const updateDaily = (patch: Partial<DailyReportSettings>) => {
         s.updateAI({ daily: { ...daily, ...patch } });
         ai.update(s.getAI());
-        renderAI(main, s, ai);
+        renderDailySettings(main, s, ai);
     };
+    const modeDesc = el("div", { class: "ar-form__hint" }, [DAILY_MODE_DESC[daily.mode || "balanced"]]);
     const modeSelect = el("select", { class: "ar-input" }) as HTMLSelectElement;
     ([
         ["fast", "快速（仅标题级全景）"],
@@ -584,7 +601,10 @@ function renderAI(main: HTMLElement, s: Storage, ai: AIService) {
         modeSelect.appendChild(el("option", { value: v, selected: daily.mode === v }, [label]));
     });
     modeSelect.addEventListener("change", () => updateDaily({ mode: modeSelect.value as DailyReportMode }));
+    wrap.appendChild(modeDesc);
     wrap.appendChild(formRow("覆盖模式", modeSelect));
+    wrap.appendChild(formRow("今日速览显示链接", checkbox(daily.showLinks !== false, (v) => updateDaily({ showLinks: v }))));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["关闭后今日速览只保留文本，不附带文章链接；重点文章摘要仍保留链接。"]));
     if (daily.mode !== "fast") {
         wrap.appendChild(formRow("重点深读数量", numberInput(daily.topN ?? 30, (v) => updateDaily({ topN: Math.max(1, Math.min(300, Math.floor(v) || 30)) }))));
         wrap.appendChild(formRow("每批深读篇数", numberInput(daily.batchSize ?? 10, (v) => updateDaily({ batchSize: Math.max(1, Math.min(50, Math.floor(v) || 10)) }))));

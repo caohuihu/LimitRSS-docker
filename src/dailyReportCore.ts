@@ -13,6 +13,7 @@ export const DEFAULT_DAILY_REPORT: Required<DailyReportSettings> = {
     topN: 30,
     batchSize: 10,
     concurrency: 2,
+    showLinks: true,
 };
 
 export interface PanoramaArticle {
@@ -58,14 +59,28 @@ export function buildPanoramaPrompt(date: string, articles: PanoramaArticle[]): 
         `请基于 ${date} 的 RSS 文章元数据生成中文日报全景速览。`,
         "要求：",
         "1. 按分类归纳当日热点与趋势，给出「今日速览」（3-6 段）。",
-        "2. 不要编造文章之外的信息；内容只依据下方编号行。",
-        "3. 最后输出「值得深读的文章编号」，每行一个编号，格式为 `- 12` 或 `12.`，最多 30 个。",
-        "4. 输出 Markdown。",
+        "2. 每个关键判断、趋势或分类总结句后面必须直接标注来源文章编号，例如 [12]、[12][45]；不要把编号集中放到最后。",
+        "3. 不要编造文章之外的信息；内容只依据下方编号行。",
+        "4. 最后单独输出小节「值得深读的文章编号」，每行一个编号，格式为 `- 12` 或 `12.`，最多 30 个；该小节仅用于内部解析，不会展示给读者。",
+        "5. 输出 Markdown，标题层级使用 ## 与 ###。",
         "",
         `（共 ${lines.length} 篇）`,
         lines.join("\n"),
     ].join("\n");
     return { prompt, lineCount: lines.length, estimateChars: prompt.length };
+}
+
+/** 从全景输出中剥离“值得深读的文章编号”内部小节，避免最终日报出现裸编号 */
+export function stripSelectionSection(text: string): string {
+    const lines = (text || "").split("\n");
+    const idx = lines.findIndex((l) => l.includes("值得深读"));
+    if (idx < 0) return text || "";
+    return lines.slice(0, idx).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** 移除正文中的 [n] 引用编号（用于关闭今日速览链接时的纯文本输出） */
+export function stripCitationMarkers(markdown: string): string {
+    return (markdown || "").replace(/\[\d{1,5}\]/g, "");
 }
 
 /** 按估算字符切块，保持原顺序且不丢文章 */
@@ -91,16 +106,33 @@ export function splitPanoramaArticles(articles: PanoramaArticle[], maxChars = PA
 /** 从全景输出中解析选中编号；忽略元数据行/越界/非编号行；空结果回退为分类均匀抽样 */
 export function selectTopArticles(panoramaText: string, articles: PanoramaArticle[], topN: number): PanoramaArticle[] {
     const picked = new Set<number>();
-    const re = /^(?:[-*•]\s*)?\[?(\d{1,5})\]?[.、)）:]?(?:\s|$)/;
-    for (const raw of (panoramaText || "").split("\n")) {
-        const line = raw.trim();
-        if (!line || line.includes("|") || /^#{1,6}\s/.test(line)) continue;
-        const m = line.match(re);
-        if (!m) continue;
-        const n = Number(m[1]);
-        if (!Number.isInteger(n) || n < 1 || n > articles.length) continue;
+    const tryAdd = (n: number) => {
+        if (!Number.isInteger(n) || n < 1 || n > articles.length) return;
         picked.add(n);
-        if (picked.size >= topN) break;
+    };
+    const lines = (panoramaText || "").split("\n");
+    const idx = lines.findIndex((l) => l.includes("值得深读"));
+    if (idx >= 0) {
+        // 优先解析“值得深读”小节：小节标题行内数字 + 后续编号行
+        const marker = lines[idx];
+        if (/值得深读[：:]\s*\d/.test(marker)) {
+            for (const m of marker.match(/\d{1,5}/g) || []) tryAdd(Number(m));
+        }
+        for (const raw of lines.slice(idx + 1)) {
+            for (const m of raw.match(/\d{1,5}/g) || []) tryAdd(Number(m));
+            if (picked.size >= topN) break;
+        }
+    } else {
+        // 兼容旧输出：按行锚定解析独立编号行
+        const re = /^(?:[-*•]\s*)?\[?(\d{1,5})\]?[.、)）:]?(?:\s|$)/;
+        for (const raw of lines) {
+            const line = raw.trim();
+            if (!line || line.includes("|") || /^#{1,6}\s/.test(line)) continue;
+            const m = line.match(re);
+            if (!m) continue;
+            tryAdd(Number(m[1]));
+            if (picked.size >= topN) break;
+        }
     }
     let selected = Array.from(picked).map((n) => articles[n - 1]).filter(Boolean) as PanoramaArticle[];
     if (!selected.length) selected = fallbackSelect(articles, topN);
@@ -157,10 +189,10 @@ export function buildDeepDivePrompt(date: string, batch: DeepDiveArticle[], batc
     return [
         `请为 ${date} 的这批重点 RSS 文章（第 ${batchIndex + 1} 批）生成中文摘要。`,
         "要求：",
-        "1. 每篇文章给 2-4 句摘要，开头标注对应编号，例如 `[1] 标题：……`。",
-        "2. 结尾单独输出本批最值得关注的 1-2 篇编号。",
+        "1. 每篇文章给 2-4 句摘要，条目以 `[编号]` 开头（如 `[1]`），随后直接写摘要正文，不要输出“标题：”行。",
+        "2. 不要输出与摘要无关的编号列表。",
         "3. 不要编造文章之外的信息。",
-        "4. 输出 Markdown。",
+        "4. 输出 Markdown（正文内可使用列表/引用）。",
         "",
         lines,
     ].join("\n");
@@ -175,6 +207,52 @@ export function mapBatchCitations(text: string, batch: ReadonlyArray<{ id: strin
     });
 }
 
+/** 把全景分块内的 [n] 按本块本地编号映射为文章链接 */
+export function mapChunkCitations(text: string, chunk: ReadonlyArray<{ id: string }>): string {
+    return mapBatchCitations(text, chunk);
+}
+
+/** 把深读批次输出规范化为“### [标题](文章链接) + 正文”，去除裸编号与“标题：”行 */
+export function normalizeDeepBatchMarkdown(
+    text: string,
+    batch: ReadonlyArray<{ id: string; title?: string }>,
+): string {
+    const src = text || "";
+    const entries: { n: number; body: string }[] = [];
+    const re = /\[(\d{1,5})\]/g;
+    let currentN: number | null = null;
+    const bodyParts: string[] = [];
+    let last = 0;
+    let m: RegExpExecArray | null;
+    const flush = () => {
+        if (currentN !== null) entries.push({ n: currentN, body: bodyParts.join("") });
+        bodyParts.length = 0;
+    };
+    while ((m = re.exec(src)) !== null) {
+        const between = src.slice(last, m.index);
+        if (currentN !== null) bodyParts.push(between);
+        flush();
+        currentN = Number(m[1]);
+        last = m.index + m[0].length;
+    }
+    if (currentN !== null) bodyParts.push(src.slice(last));
+    flush();
+    if (!entries.length) return src.trim();
+    const out: string[] = [];
+    for (const { n, body } of entries) {
+        const a = batch[n - 1];
+        if (!a) continue;
+        const clean = body
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l && !/^(编号|标题)\s*[：:]/.test(l))
+            .join("\n")
+            .replace(/\n{3,}/g, "\n\n");
+        out.push(`### [${a.title || `文章 ${n}`}](article:${a.id})` + (clean ? `\n\n${clean}` : ""));
+    }
+    return out.join("\n\n");
+}
+
 /** 模板拼接最终日报，不追加模型调用 */
 export function composeFinalReport(
     panorama: string,
@@ -182,7 +260,14 @@ export function composeFinalReport(
     opts: { skipped?: string[] } = {},
 ): string {
     const parts: string[] = [];
-    if (panorama?.trim()) parts.push(`## 今日速览\n\n${panorama.trim()}`);
+    if (panorama?.trim()) {
+        const panoramaBody = panorama
+            .trim()
+            .replace(/^#{1,6}\s*今日速览[：: 　]*.*$/gm, "")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+        if (panoramaBody) parts.push(`## 今日速览\n\n${panoramaBody}`);
+    }
     const body = deepBatches
         .map((b) => b.markdown.trim())
         .filter(Boolean)

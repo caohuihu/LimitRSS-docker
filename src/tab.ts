@@ -9,7 +9,7 @@ import { button, dropdown, DropdownItem, toast, modal, empty, spinner } from "./
 import { Storage } from "./storage";
 import { AIService } from "./ai";
 import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category, DailyReportSettings } from "./types";
-import { DEFAULT_DAILY_REPORT, articleSetHash, buildDeepDiveBatches, buildDeepDivePrompt, buildPanoramaPrompt, composeFinalReport, mapBatchCitations, runWithConcurrency, selectTopArticles, splitPanoramaArticles, type DeepBatchResult, type DeepDiveArticle } from "./dailyReportCore";
+import { DEFAULT_DAILY_REPORT, articleSetHash, buildDeepDiveBatches, buildDeepDivePrompt, buildPanoramaPrompt, composeFinalReport, mapChunkCitations, normalizeDeepBatchMarkdown, runWithConcurrency, selectTopArticles, splitPanoramaArticles, stripCitationMarkers, stripSelectionSection, type DeepBatchResult, type DeepDiveArticle } from "./dailyReportCore";
 import { fetchAndParse, resolveSubscriptionFavicon, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
 import { fetchFullText } from "./fulltext";
 import { renderFolderTemplate, saveMarkdownToSiyuan, saveToSiyuan } from "./save";
@@ -19,6 +19,7 @@ import { applyDisplaySettings } from "./theme";
 import { attachSelection } from "./selection";
 import { applyCategoryToggle, applySubToggle, categoryCheckState, scopePanelNeedsRebuild, scopeSummaryLabel, selectAll, selectNone, toggleCategoryExpanded } from "./dailyScopeCore";
 import { createPathsMemory, PathMemory } from "./saveTargetStore";
+import { stripMarkdownLinks } from "./markdownClean";
 import DOMPurify from "dompurify";
 import { genId } from "./util";
 
@@ -2024,7 +2025,7 @@ class Reader {
 
     private saveDailyReport() {
         if (!this.dailyReport || this.dailyLoading) return;
-        const markdown = this.linkDailyCitations(this.dailyReport, this.getDailyCitationArticles());
+        const markdown = stripMarkdownLinks(this.linkDailyCitations(this.dailyReport, this.getDailyCitationArticles()));
         const folder = renderFolderTemplate(this.storage.getSettings().save.folderTemplate);
         saveMarkdownToSiyuan(`${displayDate(this.dailyDate)} AI 日报`, markdown, folder, this.savePathMemory());
     }
@@ -2104,6 +2105,7 @@ class Reader {
             topN: d.topN ?? DEFAULT_DAILY_REPORT.topN,
             batchSize: d.batchSize ?? DEFAULT_DAILY_REPORT.batchSize,
             concurrency: d.concurrency ?? DEFAULT_DAILY_REPORT.concurrency,
+            showLinks: d.showLinks ?? DEFAULT_DAILY_REPORT.showLinks,
         };
     }
 
@@ -2158,7 +2160,7 @@ class Reader {
         const cachedKey = Array.isArray(cached?.scope) ? cached.scope.slice().sort().join("|") : "";
         const needDeep = cfg.mode !== "fast";
         // 1) 最终日报完整命中
-        if (cached?.markdown && !options.force && cachedKey === scopeKey && cached.mode === cfg.mode && cached.articleHash === hash) {
+        if (cached?.markdown && !options.force && cachedKey === scopeKey && cached.mode === cfg.mode && cached.articleHash === hash && cached.showLinks === cfg.showLinks) {
             this.dailyDate = date;
             this.dailyReportDate = date;
             this.dailyArticleIds = cached.articleIds || articles.map((article) => article.id);
@@ -2173,7 +2175,7 @@ class Reader {
             selectedIds.length > 0 &&
             selectedIds.every((id) => Boolean(cached?.deepDives?.[id]))
         );
-        if (cached?.panorama && cached.mode === cfg.mode && cached.articleHash === hash && deepComplete) {
+        if (cached?.panorama && cached.mode === cfg.mode && cached.articleHash === hash && cached.showLinks === cfg.showLinks && deepComplete) {
             const selected = selectedIds
                 .map((id) => articles.find((a) => a.id === id))
                 .filter(Boolean) as Article[];
@@ -2246,7 +2248,8 @@ class Reader {
                     this.render();
                     return;
                 }
-                panoramaParts.push(text.trim());
+                const stripped = stripSelectionSection(text);
+                panoramaParts.push(cfg.showLinks ? mapChunkCitations(stripped, chunks[ci]) : stripCitationMarkers(stripped));
                 this.dailyReport = panoramaParts.join("\n\n---\n\n");
                 this.render();
                 selectTopArticles(text, chunks[ci], cfg.topN).forEach((m) => {
@@ -2284,7 +2287,7 @@ class Reader {
                         skipped.push(...batch.map((a) => a.id));
                         return { articles: batch, markdown: "" };
                     }
-                    return { articles: batch, markdown: mapBatchCitations(text.trim(), batch) };
+                    return { articles: batch, markdown: normalizeDeepBatchMarkdown(text, batch) };
                 });
                 deepBatches = results;
             }
@@ -2308,6 +2311,7 @@ class Reader {
                 panorama,
                 selectedIds: picked.map((a) => a.id),
                 deepDives: Object.fromEntries(deepBatches.flatMap((b) => b.articles.map((a) => [a.id, b.markdown]))),
+                showLinks: cfg.showLinks,
                 version: 2,
             }).catch((e) => console.error("[ai-rss] save daily report", e));
         } catch (e) {

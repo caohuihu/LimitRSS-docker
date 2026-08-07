@@ -8,6 +8,7 @@ import { modal, button, toast } from "./components";
 import { siyuanIconEl } from "./icons";
 import { fetchSyncPost } from "siyuan";
 import type { PathMemory } from "./saveTargetStore";
+import { cleanMarkdownLinks, stripPluginFrontmatter } from "./markdownClean";
 
 interface Notebook { id: string; name: string; icon?: string; closed?: boolean; }
 
@@ -375,7 +376,7 @@ function createTargetPickerLegacy(notebooks: Notebook[], initialNotebook: string
     };
 }
 
-export async function saveToSiyuan(article: Article, settings: Settings, aiResults: Record<string, AIResult> = {}, sub?: Subscription, paths?: PathMemory) {
+export async function saveToSiyuan(article: Article, settings: Settings, aiResults: Record<string, AIResult> = {}, sub?: Subscription, paths?: PathMemory, onCleanLinksChange?: (v: boolean) => void) {
     // 兜底：从全局存储取最新 AI 结果，避免闭包引用/对象替换导致总结丢失
     try {
         const g = (window as any).__ai_rss__;
@@ -403,6 +404,7 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
 
     let downloadImages = settings.save.downloadImages;
     let includeLink = settings.save.includeSourceLink;
+    let cleanLinks = settings.save.cleanLinks !== false;
     let tags = (article.tags || []).join(", ");
 
     const safeName = (s: string) => (s || "untitled")
@@ -415,11 +417,12 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
     const pathPreviewEl = el("div", { class: "ar-form__hint ar-save-path-hint" });
     const linkCheck = el("input", { type: "checkbox" }) as HTMLInputElement; linkCheck.checked = includeLink;
     const imgCheck = el("input", { type: "checkbox" }) as HTMLInputElement; imgCheck.checked = downloadImages;
+    const cleanCheck = el("input", { type: "checkbox" }) as HTMLInputElement; cleanCheck.checked = cleanLinks;
     const tagInput = el("input", { class: "ar-input", type: "text", value: tags, placeholder: "用逗号分隔" });
     const previewEl = el("pre", { class: "ar-preview" });
 
     const updatePreview = () => {
-        const md = composeMd(article, settings, picker.getNotebook());
+        const md = composeMd(article, settings, picker.getNotebook(), { includeLink, cleanLinks });
         previewEl.textContent = md.slice(0, 1500) + (md.length > 1500 ? "\n…" : "");
         const nbName = notebooks.find((n) => n.id === picker.getNotebook())?.name || "";
         picker.resolvePath(safeName((nameInput as HTMLInputElement).value || article.title))
@@ -428,13 +431,16 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
     };
     const picker = createTargetPicker(notebooks, defaultNb.id, settings.save.folderTemplate || "", updatePreview, paths);
     setTimeout(updatePreview, 50);
-    [nameInput, linkCheck, imgCheck, tagInput].forEach((e) => {
+    linkCheck.addEventListener("change", () => { includeLink = linkCheck.checked; updatePreview(); });
+    imgCheck.addEventListener("change", () => { downloadImages = imgCheck.checked; updatePreview(); });
+    cleanCheck.addEventListener("change", () => { cleanLinks = cleanCheck.checked; onCleanLinksChange?.(cleanLinks); updatePreview(); });
+    [nameInput, linkCheck, imgCheck, cleanCheck, tagInput].forEach((e) => {
         e.addEventListener("change", updatePreview);
         e.addEventListener("input", updatePreview);
     });
 
     const doSave = async () => {
-        const md = composeMd(article, settings, picker.getNotebook());
+        const md = composeMd(article, settings, picker.getNotebook(), { includeLink, cleanLinks });
         const tags2 = (tagInput as HTMLInputElement).value.split(",").map((s) => s.trim()).filter(Boolean);
         const saveBtn = dialog.container.querySelector(".ar-save-btn") as HTMLButtonElement;
         saveBtn.disabled = true;
@@ -498,6 +504,7 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
                 el("div", { class: "ar-form__opts" }, [
                     el("label", { class: "ar-check" }, [linkCheck, " 包含原文链接"]),
                     el("label", { class: "ar-check" }, [imgCheck, " 下载远程图片到本地"]),
+                    el("label", { class: "ar-check" }, [cleanCheck, " 链接清理（保留原文链接）"]),
                 ]),
             ]),
             el("div", { class: "ar-form__row" }, [
@@ -590,17 +597,19 @@ export async function saveMarkdownToSiyuan(title: string, markdown: string, fold
     });
 }
 
-function composeMd(article: Article, settings: Settings, _notebook: string): string {
+function composeMd(article: Article, settings: Settings, _notebook: string, opts: { includeLink?: boolean; cleanLinks?: boolean } = {}): string {
     const cleaned = preprocessArticleHtml(article.content || "", article.link);
     const tmp = document.createElement("div");
     tmp.innerHTML = cleaned;
     const md = htmlToMd(tmp);
 
+    const includeLink = opts.includeLink ?? settings.save.includeSourceLink !== false;
+    const cleanLinks = opts.cleanLinks ?? settings.save.cleanLinks !== false;
     const vars: Record<string, string> = {
         title: article.title || "(无标题)",
         author: article.author || "未知",
         date: new Date(article.pubDate).toLocaleDateString("zh-CN"),
-        link: article.link || "",
+        link: includeLink ? (article.link || "") : "",
         source: "",
         content: md,
         summary: "",
@@ -610,7 +619,17 @@ function composeMd(article: Article, settings: Settings, _notebook: string): str
     for (const k of Object.keys(vars)) {
         out = out.replace(new RegExp(`\\{\\{${k}\\}\\}`, "g"), vars[k]);
     }
-    return dedupeMarkdown(out);
+    if (!includeLink) {
+        // 关闭“包含原文链接”时移除原文链接（空链接或指向原文 URL 的 markdown 链接）
+        out = out.replace(/\[([^\]]*)\]\(([^)]*)\)/g, (m: string, _label: string, url: string) => {
+            const u = url.trim();
+            return !u || u === article.link ? "" : m;
+        });
+    }
+    if (cleanLinks) {
+        out = cleanMarkdownLinks(out, includeLink ? { keepUrl: article.link } : undefined);
+    }
+    return stripPluginFrontmatter(dedupeMarkdown(out));
 }
 
 function htmlToMd(node: Node, depth = 0): string {
@@ -681,7 +700,8 @@ function htmlToMd(node: Node, depth = 0): string {
         }
         case "a": {
             const href = n.getAttribute("href") || "";
-            return href ? `[${inlineToStr(n)}(${href})]` : inlineToStr(n);
+            const label = inlineToStr(n).trim();
+            return href ? `[${label}](${href})` : label;
         }
         case "img": {
             const src = n.getAttribute("src") || "";
