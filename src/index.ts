@@ -5,6 +5,10 @@
 import { Plugin, Setting, openTab } from "siyuan";
 import "./index.scss";
 
+// 必须在最顶部注入：全局拦截跨域 fetch，绕过浏览器 CORS
+import { patchFetchIf_needed } from "./cors-patch";
+patchFetchIf_needed();
+
 import { Storage } from "./storage";
 import { AIService } from "./ai";
 import { RssTab } from "./tab";
