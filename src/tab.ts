@@ -2274,6 +2274,7 @@ class Reader {
                         category: this.dailyCategoryName(a),
                         link: a.link || "",
                         description: a.description || a.content || "",
+                        content: a.fullText || a.content || undefined,
                     }));
                     let text = "";
                     try {

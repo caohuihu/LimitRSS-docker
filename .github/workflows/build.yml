@@ -1,0 +1,38 @@
+name: Build Plugin
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Upload package.zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: LimitRSS-plugin
+          path: package.zip
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: LimitRSS v${{ github.run_number }}
+          files: package.zip
+          draft: false
+          prerelease: false

@@ -7,6 +7,42 @@ import { el, escapeHtml } from "./ui";
 
 const MAX_CONTENT = 16000;
 
+/** 思源内核网络请求兜底（同 fetcher.ts 模式） */
+async function siyuanForwardProxy(url: string, options: { method?: string; headers?: Record<string, string>; body?: any; timeout?: number }): Promise<Response> {
+    // 先尝试 siyuan.api.forwardProxy
+    const siyuan = (window as any).siyuan;
+    if (siyuan?.api?.forwardProxy) {
+        const r = await siyuan.api.forwardProxy(url, {
+            method: options.method || "POST",
+            timeout: options.timeout || 30000,
+            headers: Object.entries(options.headers || {}).map(([k, v]) => ({ [k]: v })),
+            payload: options.body,
+        });
+        if (r?.body) {
+            return new Response(r.body, {
+                status: Number(r.status) || 200,
+                headers: new Headers((r as any).headers || {}),
+            });
+        }
+    }
+    // 兜底：fetchSyncPost
+    const { fetchSyncPost } = await import("siyuan");
+    const r: any = await fetchSyncPost("/api/network/forwardProxy", {
+        url,
+        method: options.method || "POST",
+        timeout: options.timeout || 30000,
+        headers: options.headers || {},
+        payload: options.body,
+    });
+    if (r.code === 0 && r.data?.body) {
+        return new Response(r.data.body, {
+            status: Number(r.data.status) || 200,
+            headers: new Headers(r.data.headers || {}),
+        });
+    }
+    throw new Error(r.msg || "siyuan forwardProxy failed");
+}
+
 export class AIService {
     settings: AISettings;
 
@@ -146,7 +182,9 @@ async function listOpenAICompatibleModels(p: AIProvider): Promise<string[]> {
     const url = `${(p.endpoint || "").replace(/\/+$/, "")}/models`;
     const headers: Record<string, string> = {};
     if (p.apiKey) headers["Authorization"] = `Bearer ${p.apiKey}`;
-    const resp = await fetch(url, { method: "GET", headers });
+    const resp = await (fetch(url, { method: "GET", headers })
+        .catch(() => siyuanForwardProxy(url, { method: "GET" }))
+    );
     if (!resp.ok) {
         const t = await resp.text().catch(() => "");
         throw new Error(`HTTP ${resp.status}: ${t.slice(0, 200) || resp.statusText}`);
@@ -183,7 +221,8 @@ async function callOpenAICompatible(
         temperature: p.temperature ?? 0.7, max_tokens: p.maxTokens ?? 2048,
     };
     if (stream) body.stream_options = { include_usage: true };
-    const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
+    const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal })
+        .catch(() => siyuanForwardProxy(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) }));
     if (!resp.ok) {
         const t = await resp.text().catch(() => "");
         throw new Error(`HTTP ${resp.status}: ${t.slice(0, 200)}`);
@@ -256,7 +295,8 @@ async function callAnthropic(
         temperature: p.temperature ?? 0.7,
         stream,
     };
-    const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
+    const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal })
+        .catch(() => siyuanForwardProxy(url, { method: "POST", headers, body: JSON.stringify(body) }));
     if (!resp.ok) {
         const t = await resp.text().catch(() => "");
         throw new Error(`HTTP ${resp.status}: ${t.slice(0, 200)}`);

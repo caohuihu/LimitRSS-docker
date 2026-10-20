@@ -26,6 +26,8 @@ export interface PanoramaArticle {
 export interface DeepDiveArticle extends PanoramaArticle {
     link: string;
     description: string;
+    /** 文章全文（HTML），优先于 description 发送给 AI */
+    content?: string;
 }
 
 export interface PanoramaPrompt {
@@ -173,17 +175,26 @@ export function buildDeepDiveBatches<T>(selected: T[], batchSize: number): T[][]
     return out;
 }
 
-/** 单个深读批次的提示词：本地编号 + 标题/链接/摘要 */
+/** 单个深读批次的提示词：本地编号 + 标题/链接/全文（优先 content，回退 description） */
 export function buildDeepDivePrompt(date: string, batch: DeepDiveArticle[], batchIndex: number): string {
     const lines = batch.map((a, i) => {
-        const text = (a.description || "").replace(/\s+/g, " ").trim().slice(0, 320);
+        // 优先使用全文 content，回退到摘要 description；对 HTML 内容先提取纯文本再截断
+        const raw = a.content || a.description || "";
+        const tmp = typeof document !== "undefined" ? document.createElement("div") : null;
+        let text: string;
+        if (tmp) {
+            tmp.innerHTML = raw;
+            text = (tmp.textContent || "").replace(/\s+/g, " ").trim();
+        } else {
+            text = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+        }
         return [
             `编号：${i + 1}`,
             `分类：${a.category || "未分类"}`,
             `来源：${a.source || "未知"}`,
             `标题：${a.title || "(无标题)"}`,
             `链接：${a.link || ""}`,
-            `摘要：${text}`,
+            `正文：${text}`,
         ].join("\n");
     }).join("\n\n");
     return [
