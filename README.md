@@ -1,5 +1,15 @@
 # LimitRSS · 思源笔记 AI RSS 阅读器
 
+#只为修复在浏览器无法使用ai的问题
+
+修复：CORS的全局取指截获器（遵循参考插件模式）。所有跨源请求现在都经过思渊 /api/network/forwardProxy。
+
+内容包括：
+
+全局 window.fetch 补丁（绕过浏览器/Docker 中的 CORS）
+AI每日报告使用完整文章内容
+RSS 获取的前向代理备份
+
 > 打破信息获取与知识内化的壁垒。订阅、阅读、让 AI 帮你总结、翻译，把文章变成你的知识库。
 
 [English](./README.en.md) · [反馈问题](https://github.com/Demisse233/LimitRSS/issues) · [功能建议](https://github.com/Demisse233/LimitRSS/issues)
