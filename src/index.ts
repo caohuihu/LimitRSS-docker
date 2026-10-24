@@ -126,7 +126,10 @@ export default class AIRSSPlugin extends Plugin {
             openSettings(this.storage, this.ai);
         };
 
+        // 数据就绪后：先把加载到的真实配置同步给 AIService（构造时拿到的是默认值，
+        // 不补这一步会导致 providers/prompts/daily 设置重启后"丢失"，AI 报"未配置提供商"）
         await this.storage.whenReady();
+        this.ai.update(this.storage.getAI());
         this.storage.on(() => this.ai.update(this.storage.getAI()));
         // 数据就绪后按已加载的设置重新应用入口（首次 onLayoutReady 可能已用默认值注册）
         if (this.layoutReady) this.applyEntry();

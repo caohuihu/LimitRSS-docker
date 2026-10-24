@@ -5,6 +5,7 @@
  * and map them to Solar's line-duotone icons here.
  */
 
+import { secureResourceUrl } from "./util";
 import addCircle from "@iconify-icons/solar/add-circle-line-duotone";
 import altArrowDown from "@iconify-icons/solar/alt-arrow-down-line-duotone";
 import altArrowLeft from "@iconify-icons/solar/alt-arrow-left-line-duotone";
@@ -273,7 +274,8 @@ export function renderFavicon(value: string | undefined, className: string, fall
     const v = (value || "").trim();
     if (/^data:image\//.test(v) || /^https?:/i.test(v)) {
         const img = document.createElement("img");
-        img.src = v;
+        // 浏览器（https）模式下升级 http:// 图标，避免混合内容被拦截
+        img.src = secureResourceUrl(v);
         img.alt = "";
         img.addEventListener("error", () => {
             clearFaviconFallback(wrap);

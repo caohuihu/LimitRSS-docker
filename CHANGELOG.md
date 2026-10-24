@@ -1,5 +1,21 @@
 # CHANGELOG.md
 
+## [v0.2.5] 2026-10-25
+
+### 中文说明
+
+#### 修复（Fixed）
+
+- **重启后 AI 功能提示"请先在设置中配置 AI 提供商"（实际已配置）**：`onload` 在数据加载完成前就用默认配置构造了 `AIService`，而加载完成时的一次 emit 又被晚注册的订阅错过，导致重启/重载插件后 AI 配置"丢失"（打开设置页才恢复）。现在 `whenReady` 后立即把已加载配置同步给 `AIService`，AI 提供商/提示词/日报设置重启后即刻生效。
+- **浏览器（Docker/https）模式下 http:// 图片被混合内容策略拦截**（favicon、正文图片，控制台 Mixed Content 告警）：新增 `secureResourceUrl`，在 https 应用下把 `<img>` 加载的 `http://` 地址升级为 `https://`（正文渲染、订阅图标、图标预览）；fetch 类请求本就走内核代理，不受影响。
+
+### English
+
+#### Fixed
+
+- **"Please configure an AI provider in Settings" after restart despite providers being configured**: `onload` built the `AIService` with default settings before data was loaded, and the one-time load-completion emit was missed by the late-registered subscription — so AI settings were effectively lost until the settings page was opened. The loaded settings are now synced to the `AIService` right after `whenReady()`, so providers/prompts/daily-report settings survive restarts.
+- **Mixed-content blocks for `http://` images in browser (Docker/https) mode** (favicons, article images; console Mixed Content warnings): added `secureResourceUrl` which upgrades `http://` to `https://` for `<img>` loads (article rendering, subscription icons, icon preview) when the app runs over https. Fetched requests already go through the kernel proxy and are unaffected.
+
 ## [v0.2.4] 2026-10-24
 
 ### 中文说明

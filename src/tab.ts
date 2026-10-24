@@ -21,7 +21,7 @@ import { applyCategoryToggle, applySubToggle, categoryCheckState, scopePanelNeed
 import { createPathsMemory, PathMemory } from "./saveTargetStore";
 import { stripMarkdownLinks } from "./markdownClean";
 import DOMPurify from "dompurify";
-import { genId, dateKey } from "./util";
+import { genId, dateKey, secureResourceUrl } from "./util";
 
 // =============== 工具 ===============
 
@@ -56,7 +56,10 @@ function postProcess(html: string): string {
     div.querySelectorAll("a").forEach((a) => { a.setAttribute("target", "_blank"); a.setAttribute("rel", "noopener noreferrer"); });
     const seenImg = new Set<string>();
     div.querySelectorAll("img").forEach((i) => {
-        const src = i.getAttribute("src") || "";
+        const rawSrc = i.getAttribute("src") || "";
+        // https 应用（浏览器/Docker 模式）下升级 http:// 图片，避免混合内容被拦截
+        const src = secureResourceUrl(rawSrc);
+        if (rawSrc !== src) i.setAttribute("src", src);
         if (src && seenImg.has(src)) {
             i.remove(); // 相同图片只保留第一张，避免图文重复
             return;
@@ -602,7 +605,7 @@ class Sidebar {
                     always: true,
                 });
                 if (faviconInfo.favicon) {
-                    previewIcon.src = faviconInfo.favicon;
+                    previewIcon.src = secureResourceUrl(faviconInfo.favicon);
                     previewIcon.style.display = "";
                     previewUrl.textContent = faviconInfo.favicon;
                     urlInput.dataset.favicon = faviconInfo.favicon;
