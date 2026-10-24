@@ -829,18 +829,17 @@ function renderAbout(main: HTMLElement) {
     wrap.appendChild(el("div", { class: "ar-about" }, [
         el("div", { class: "ar-about__logo" }, [makeIcon("rssMain", 48)]),
         el("h2", {}, ["LimitRSS"]),
-        el("p", { class: "ar-about__ver" }, ["v0.1.6 · 2026-07-22"]),
+        el("p", { class: "ar-about__ver" }, [`v${__LIMITRSS_VERSION__}`]),
         el("p", {}, ["用 AI 收敛信息噪音的 RSS 阅读器。"]),
         el("hr"),
         el("h3", {}, ["特性"]),
         el("ul", {}, [
             ["rss", "RSS/Atom 订阅管理、OPML 导入导出"],
             ["ai", "通用 OpenAI 兼容 AI 接口，可配置多个提供商"],
-            ["fileText", "流式总结/翻译/关键观点/思维导图/主题日报/智能标签"],
-            ["save", "一键保存到思源，自动下载远程图片到本地"],
+            ["fileText", "AI 流式总结 / 翻译 / 日报（深读正文可截断）"],
+            ["save", "一键保存到思源，远程图片可本地化"],
             ["palette", "跟随思源主题，深色模式原生支持"],
-            ["keyboard", "完整快捷键支持"],
-        ].map(([ic, t]) => el("li", {}, [iconLabel(ic, t, 13)]))),
+        ].map(([ic, t]) => el("li", {}, [iconLabel(ic as string, t as string, 13)]))),
         el("hr"),
         el("p", {}, [iconLabel("shield", "API Key 仅存储在本地工作空间。", 13)]),
     ]));

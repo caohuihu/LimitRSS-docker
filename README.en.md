@@ -29,19 +29,6 @@
 - 📋 **Multiple Notebooks** — Choose where to save each article
 - 📑 **Template System** — Customize output format with variables
 
-### ⌨️ Keyboard
-| Key | Action |
-|---|---|
-| `J` / `K` | Next / Previous article |
-| `M` | Toggle read/unread |
-| `S` | Toggle star |
-| `O` | Open original |
-| `⌘S` | Save to SiYuan |
-| `R` | Refresh |
-| `⌘F` | Search |
-| `I` | Toggle AI panel |
-| `?` | Show help |
-
 ## 🚀 Installation
 
 ### From Bazaar (recommended)

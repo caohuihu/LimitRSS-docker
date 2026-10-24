@@ -7,6 +7,10 @@ const ZipPlugin = require("zip-webpack-plugin");
 module.exports = (env, argv) => {
     const production = argv.mode === "production";
     const plugins = [
+        new webpack.DefinePlugin({
+            // About 页展示的版本号：构建时从 plugin.json 读取，避免手工维护
+            __LIMITRSS_VERSION__: JSON.stringify(require("./plugin.json").version),
+        }),
         new MiniCssExtractPlugin({
             filename: production ? "dist/index.css" : "index.css",
         }),

@@ -459,7 +459,15 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
             const docId = r.data as string;
             await fetchSyncPost("/api/sqlite/flushTransaction", {}).catch(() => {});
             if (imgCheck.checked) {
-                await fetchSyncPost("/api/format/netImg2LocalAssets", { id: docId, url: article.link || "" }).catch(() => {});
+                // 远程图片本地化：失败时给出提示（文档本身已保存成功）
+                try {
+                    const ir: any = await fetchSyncPost("/api/format/netImg2LocalAssets", { id: docId, url: article.link || "" });
+                    if (!ir || ir.code !== 0) {
+                        toast("文档已保存，但远程图片本地化失败，图片仍为外链", "warn", 5000);
+                    }
+                } catch {
+                    toast("文档已保存，但远程图片本地化失败，图片仍为外链", "warn", 5000);
+                }
             }
             if (tags2.length > 0) {
                 await fetchSyncPost("/api/attr/setBlockAttrs", {
