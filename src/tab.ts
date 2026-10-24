@@ -3235,14 +3235,28 @@ export class RssTab {
             if (t && t.scrollWidth > t.clientWidth + 2) ev.stopPropagation();
         }, { passive: true });
 
-        // 阅读快捷键（仅当按键发生在本面板内时生效；弹窗/输入框打开时不拦截）
-        this.root.addEventListener("keydown", this.onKey, true);
+        // 阅读快捷键：焦点进入面板（点击面板任意处）后在 document 级生效；
+        // 焦点在思源编辑器/输入框时绝不拦截
+        this.root.setAttribute("tabindex", "-1");
+        this.root.addEventListener("click", this.onPanelClick, true);
+        document.addEventListener("keydown", this.onKey, true);
     }
+
+    /** 点击面板内的非交互元素时，把焦点移到面板根，使快捷键生效 */
+    private onPanelClick = (ev: MouseEvent) => {
+        const t = ev.target as HTMLElement | null;
+        if (!t || !this.root.contains(t)) return;
+        if (t.closest("input, textarea, select, button, a, [contenteditable='true']")) return;
+        this.root.focus({ preventScroll: true });
+    };
 
     /** 阅读快捷键：J/K 上下篇、M 已读、S 星标、O 原文、R 刷新、I AI 总结、? 帮助、⌘/Ctrl+S 保存、⌘/Ctrl+F 搜索 */
     private onKey = (ev: KeyboardEvent) => {
-        const target = ev.target as HTMLElement | null;
-        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+        const ae = document.activeElement as HTMLElement | null;
+        // 焦点必须在 LimitRSS 面板内（面板根或其后代）
+        if (!ae || (ae !== this.root && !this.root.contains(ae))) return;
+        // 输入场景不拦截：面板内的输入框/可编辑元素
+        if (ae !== this.root && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
         if (document.querySelector(".ar-modal__backdrop")) return;
         const mod = ev.metaKey || ev.ctrlKey;
         const key = ev.key;
@@ -3312,7 +3326,7 @@ export class RssTab {
             ]),
         ));
         modal({ title: "阅读快捷键", width: "380px", content: el("div", {}, [
-            el("div", { class: "ar-form__hint" }, ["仅在 LimitRSS 面板获得焦点时生效；输入框与弹窗打开时不拦截。"]),
+            el("div", { class: "ar-form__hint" }, ["点击面板内任意处一次即可激活；输入框与弹窗打开时不拦截。"]),
             list,
         ]) });
     }
@@ -3324,7 +3338,8 @@ export class RssTab {
         this.autoRefreshTimer = undefined;
         this.refreshInterval = undefined;
         this.refreshDoneTimer = undefined;
-        this.root.removeEventListener("keydown", this.onKey, true);
+        this.root.removeEventListener("click", this.onPanelClick, true);
+        document.removeEventListener("keydown", this.onKey, true);
         this.faviconJobs.clear();
         this.sidebar?.destroy();
         this.list?.destroy();

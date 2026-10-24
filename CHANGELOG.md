@@ -1,5 +1,19 @@
 # CHANGELOG.md
 
+## [v0.2.3] 2026-10-24
+
+### 中文说明
+
+#### 修复（Fixed）
+
+- **阅读快捷键完全失效**：v0.2.2 把 keydown 监听绑在面板容器上，而点击文章/列表后浏览器焦点停在 `body` 或思源编辑器，按键事件根本进不了面板，导致 J/K/M/S 等全部无效（与思源版本无关；SDK 的 `Plugin` 类本就没有快捷键注册 API）。现改为 `document` 级监听 + `activeElement` 焦点判定：点击面板内任意处一次即自动聚焦面板根，快捷键立即生效；焦点在思源编辑器、任何输入框或弹窗打开时绝不拦截，保证不影响正常打字与思源自身按键。
+
+### English
+
+#### Fixed
+
+- **Keyboard shortcuts completely unresponsive**: v0.2.2 attached the keydown listener to the panel container, but after clicking an article/list item the browser focus stays on `body` or the SiYuan editor, so key events never reached the panel and J/K/M/S/… did nothing (unrelated to the SiYuan version; the SDK `Plugin` class has no shortcut-registration API to begin with). The listener now lives on `document` with an `activeElement` guard: a single click anywhere in the panel focuses the panel root and shortcuts become active instantly; while focus is in the SiYuan editor, any input field, or a dialog is open, no key is ever intercepted.
+
 ## [v0.2.2] 2026-10-24
 
 ### 中文说明
