@@ -2,7 +2,7 @@
  * 保存文章到思源
  */
 
-import { Article, AIResult, Settings, Subscription } from "./types";
+import { Article, AIResult, Settings, Subscription, DEFAULT_PROMPTS } from "./types";
 import { el, clear } from "./ui";
 import { modal, button, toast } from "./components";
 import { siyuanIconEl } from "./icons";
@@ -422,13 +422,22 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
     const previewEl = el("pre", { class: "ar-preview" });
 
     // 是否将各 AI 结果（总结/翻译…）附进文档：逐条勾选。
-    // 有 preset.includeAI 时只勾选指定的；否则默认全部勾选
+    // 内置的文章级类型（总结/翻译）始终可见：已生成的可勾选，未生成的显示提示；
+    // 有 preset.includeAI 时只勾选指定的，否则已生成的默认全部勾选
+    const knownPromptIds = DEFAULT_PROMPTS.filter((p) => p.id !== "quick_daily_report").map((p) => p.id);
+    const knownPromptNames = new Map(DEFAULT_PROMPTS.map((p) => [p.id, p.name]));
     const aiChecks: { pid: string; label: string; input: HTMLInputElement }[] = [];
-    for (const [pid, r] of Object.entries(aiResults)) {
-        if (!r?.content) continue;
-        const cb = el("input", { type: "checkbox" }) as HTMLInputElement;
-        cb.checked = preset?.includeAI ? !!preset.includeAI[pid] : true;
-        aiChecks.push({ pid, label: r.promptName || pid, input: cb });
+    const aiMissingLabels: string[] = [];
+    for (const pid of Array.from(new Set([...Object.keys(aiResults), ...knownPromptIds]))) {
+        const r = aiResults[pid];
+        const label = r?.promptName || knownPromptNames.get(pid) || pid;
+        if (r?.content) {
+            const cb = el("input", { type: "checkbox" }) as HTMLInputElement;
+            cb.checked = preset?.includeAI ? !!preset.includeAI[pid] : true;
+            aiChecks.push({ pid, label, input: cb });
+        } else if (knownPromptIds.includes(pid)) {
+            aiMissingLabels.push(label);
+        }
     }
     const aiInclude = () => Object.fromEntries(aiChecks.map((c) => [c.pid, c.input.checked]));
 
@@ -450,12 +459,18 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
         e.addEventListener("change", updatePreview);
         e.addEventListener("input", updatePreview);
     });
-    const aiRow = aiChecks.length
+    const aiRowItems: HTMLElement[] = aiChecks.map((c) =>
+        el("label", { class: "ar-check" }, [c.input, ` ${c.label}`]),
+    );
+    if (aiMissingLabels.length) {
+        aiRowItems.push(el("div", { class: "ar-form__hint" }, [
+            `尚未生成：${aiMissingLabels.join("、")}。可先在阅读器顶部点击对应 AI 图标生成，再回来保存。`,
+        ]));
+    }
+    const aiRow = aiRowItems.length
         ? el("div", { class: "ar-form__row" }, [
             el("label", { class: "ar-form__label" }, ["AI 结果"]),
-            el("div", { class: "ar-save-ai-checks" }, aiChecks.map((c) =>
-                el("label", { class: "ar-check" }, [c.input, ` ${c.label}`]),
-            )),
+            el("div", { class: "ar-save-ai-checks" }, aiRowItems),
         ])
         : null;
 

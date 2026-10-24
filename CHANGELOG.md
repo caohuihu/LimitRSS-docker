@@ -1,5 +1,19 @@
 # CHANGELOG.md
 
+## [v0.2.6] 2026-10-25
+
+### 中文说明
+
+#### 改进（Improved）
+
+- **"AI 结果"勾选区始终显示 总结/翻译 两种类型**：之前只列出该文章**已生成过**的结果，没生成总结时就看不到"AI 总结"选项，容易误以为功能不存在。现在内置的文章级类型（AI 总结、AI 翻译）始终可见：已生成的可勾选（默认全勾），未生成的显示"尚未生成：AI 总结。可先在阅读器顶部点击对应 AI 图标生成，再回来保存。"的提示。
+
+### English
+
+#### Improved
+
+- **The "AI results" checkbox area now always shows both Summary and Translation**: previously only results already generated for the article were listed, so without a generated summary the "AI summary" option was invisible and the feature seemed missing. The built-in article-level types (AI summary / AI translation) are now always visible: generated ones are checkable (checked by default); missing ones show a hint to generate them in the reader first.
+
 ## [v0.2.5] 2026-10-25
 
 ### 中文说明
