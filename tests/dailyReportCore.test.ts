@@ -163,6 +163,25 @@ test("buildDeepDivePrompt 包含批次信息与文章内容", () => {
     assert.ok(p.includes("这是摘要内容"));
 });
 
+test("buildDeepDivePrompt 按篇截断正文（truncateChars）", () => {
+    const long = "A".repeat(200);
+    const batch = [{
+        id: "x1", title: "t", source: "s", category: "c",
+        link: "https://example.com/1", content: `<p>${long}</p>`,
+    }];
+    const truncated = buildDeepDivePrompt("2026-08-07", batch, 0, { truncateChars: 50 });
+    assert.ok(truncated.includes("A".repeat(50)));
+    assert.ok(truncated.includes("[…过长已截断]"));
+    assert.ok(!truncated.includes(long));
+    // 0 = 不截断
+    const full = buildDeepDivePrompt("2026-08-07", batch, 0, { truncateChars: 0 });
+    assert.ok(full.includes(long));
+    assert.ok(!full.includes("[…过长已截断]"));
+    // 未传选项 = 不截断（兼容旧调用）
+    const def = buildDeepDivePrompt("2026-08-07", batch, 0);
+    assert.ok(def.includes(long));
+});
+
 test("mapBatchCitations 把批次内编号映射为文章链接", () => {
     const batch = [
         { id: "x1", title: "t", source: "s", category: "c" },

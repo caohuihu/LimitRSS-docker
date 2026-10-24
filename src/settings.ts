@@ -609,6 +609,14 @@ function renderDailySettings(main: HTMLElement, s: Storage, ai: AIService) {
         wrap.appendChild(formRow("重点深读数量", numberInput(daily.topN ?? 30, (v) => updateDaily({ topN: Math.max(1, Math.min(300, Math.floor(v) || 30)) }))));
         wrap.appendChild(formRow("每批深读篇数", numberInput(daily.batchSize ?? 10, (v) => updateDaily({ batchSize: Math.max(1, Math.min(50, Math.floor(v) || 10)) }))));
         wrap.appendChild(formRow("并发请求数", numberInput(daily.concurrency ?? 2, (v) => updateDaily({ concurrency: Math.max(1, Math.min(8, Math.floor(v) || 2)) }))));
+        wrap.appendChild(formRow("截断文章正文", checkbox(daily.truncateContent !== false, (v) => updateDaily({ truncateContent: v }))));
+        const charsRow = formRow("每篇保留字符数", numberInput(daily.truncateChars ?? DEFAULT_DAILY_REPORT.truncateChars, (v) => updateDaily({ truncateChars: Math.max(0, Math.min(50000, Math.floor(v) || 0)) })));
+        if (daily.truncateContent === false) {
+            const charsInput = charsRow.querySelector("input");
+            if (charsInput) charsInput.setAttribute("disabled", "");
+        }
+        wrap.appendChild(charsRow);
+        wrap.appendChild(el("div", { class: "ar-form__hint" }, ["0 表示不截断；仅限制深读阶段发给 AI 的正文长度，不影响文章存储与展示。修改后下次生成日报时生效。"]));
         wrap.appendChild(el("div", { class: "ar-form__hint" }, ["并发过高可能触发提供商限流；每批篇数影响单次请求长度。"]));
     } else {
         wrap.appendChild(el("div", { class: "ar-form__hint" }, ["快速模式仅生成标题级全景速览，不进行重点深读。"]));

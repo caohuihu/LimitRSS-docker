@@ -16,3 +16,12 @@ export function genId(prefix = ""): string {
     for (let i = 0; i < 7; i++) r += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
     return `${prefix}${y}${m}${dd}${H}${M}${S}-${r}`;
 }
+
+/** 本地日期键（YYYY-MM-DD），日报与统计共用，保证两侧口径一致 */
+export function dateKey(ts: number): string {
+    const d = new Date(ts);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+}

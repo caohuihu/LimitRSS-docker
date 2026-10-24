@@ -66,6 +66,9 @@ export function patchFetchIf_needed(): void {
 
         const timeout = 60_000; // 60s timeout for AI calls
 
+        // 无 body 的请求（GET 等）不声明 content-type，避免部分站点 415
+        const effectiveContentType = body != null ? (contentType || "application/json") : "";
+
         // 方案 A：直接调用 siyuan.api.forwardProxy（同步 API，最快）
         const siyuan = (window as any).siyuan;
         let proxyResult: any;
@@ -74,22 +77,22 @@ export function patchFetchIf_needed(): void {
                 proxyResult = await siyuan.api.forwardProxy(url, {
                     method,
                     timeout,
-                    contentType: contentType || "application/json",
+                    contentType: effectiveContentType || undefined,
                     headers: Object.keys(headers).map((k) => ({ [k]: headers[k] })),
                     payload: body ?? undefined,
                 });
             }
         } catch { /* fall through to fallback */ }
 
-        // 方案 B：通过 fetchSyncPost SDK 调用
-        if (!proxyResult || !proxyResult.code) {
+        // 方案 B：通过 fetchSyncPost SDK 调用（仅 A 不可用/失败时，避免双发）
+        if (!proxyResult || proxyResult.code !== 0) {
             const { fetchSyncPost } = await import("siyuan");
             try {
                 proxyResult = await fetchSyncPost("/api/network/forwardProxy", {
                     url,
                     method,
                     timeout,
-                    contentType: contentType || "application/json",
+                    contentType: effectiveContentType || undefined,
                     headers: Object.keys(headers).map((k) => ({ [k]: headers[k] })),
                     payload: body ?? undefined,
                 });

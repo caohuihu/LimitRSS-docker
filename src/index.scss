@@ -728,9 +728,7 @@
     grid-area: 1 / 1;
 }
 
-.ar-rd__translate-char {
-    display: inline-block;
-    white-space: pre;
+.ar-rd__translate-original {
     transition:
         opacity 160ms var(--ar-trans),
         transform 160ms var(--ar-trans),

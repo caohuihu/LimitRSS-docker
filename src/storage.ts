@@ -4,7 +4,25 @@
  */
 
 import { Plugin } from "siyuan";
-import { Article, Category, DailyReportCache, Subscription, Settings, AISettings, KEYS, DEFAULT_SETTINGS, DEFAULT_AI } from "./types";
+import { Article, Category, DailyReportCache, Subscription, Settings, AISettings, KEYS, DEFAULT_SETTINGS, DEFAULT_AI, ArticleExtras, FullTextRecord } from "./types";
+import { dateKey } from "./util";
+
+export type StorageEvent =
+    | "read" | "star" | "articles" | "subs" | "cats"
+    | "settings" | "ai" | "daily" | "extras" | "fulltext";
+
+/** 大字段写盘合并窗口：同一 key 的多次变更只落一次盘 */
+const SCHEDULED_SAVE_MS = 800;
+
+export interface ArticleStats {
+    total: number;
+    totalUnread: number;
+    todayUnread: number;
+    starred: number;
+    dateCount: number;
+    /** 每个订阅源的未读文章数 */
+    unreadBySub: Map<string, number>;
+}
 
 const LEGACY_PLUGIN_STORAGE_DIRS = ["ai-rss"];
 
@@ -34,8 +52,13 @@ export class Storage {
     settings: Settings = DEFAULT_SETTINGS;
     ai: AISettings = DEFAULT_AI;
     dailyReports: Record<string, DailyReportCache> = {};
+    /** 按文章 id 拆出的大字段（aiResults/highlights/tags/savedDocId），与 articles 主表分离持久化 */
+    extras: Record<string, ArticleExtras> = {};
+    /** 按文章 id 拆出的全文记录，与 articles 主表分离持久化 */
+    fulltexts: Record<string, FullTextRecord> = {};
 
     listeners: Set<() => void> = new Set();
+    private typeListeners: Map<string, Set<() => void>> = new Map();
 
     constructor(plugin: Plugin) {
         this.plugin = plugin;
@@ -43,16 +66,32 @@ export class Storage {
     }
     whenReady() { return this.ready; }
     on(fn: () => void) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
-    private emit() { this.listeners.forEach((l) => l()); }
+    /** 订阅指定类型事件（旧版 on() 等价于订阅全部事件） */
+    onTypes(types: StorageEvent[], fn: () => void) {
+        for (const t of types) {
+            let set = this.typeListeners.get(t);
+            if (!set) { set = new Set(); this.typeListeners.set(t, set); }
+            set.add(fn);
+        }
+        const unsub = () => {
+            for (const t of types) this.typeListeners.get(t)?.delete(fn);
+        };
+        return unsub;
+    }
+    private emit(type: StorageEvent | "*" = "*") {
+        this.listeners.forEach((l) => l());
+        if (type !== "*") this.typeListeners.get(type)?.forEach((l) => l());
+    }
     private defaultCat(): Category {
         return { id: "c_default", name: "未分类", color: "#94a3b8", sortOrder: 9999, collapsed: false, builtin: true };
     }
     private withDefaultCat(cats: Category[]) {
-        return cats.some((c) => c.id === "c_default") ? cats : [this.defaultCat(), ...cats];
+        const list = cats.some((c) => c.id === "c_default") ? cats.slice() : [...cats, this.defaultCat()];
+        return list.sort((a, b) => a.sortOrder - b.sortOrder);
     }
 
     private async load() {
-        const [s, c, a, r, st, sg, ai, dr] = await Promise.all([
+        const [s, c, a, r, st, sg, ai, dr, ex, ft] = await Promise.all([
             this.loadDataWithLegacyFallback(KEYS.subs),
             this.loadDataWithLegacyFallback(KEYS.cats),
             this.loadDataWithLegacyFallback(KEYS.articles),
@@ -61,6 +100,8 @@ export class Storage {
             this.loadDataWithLegacyFallback(KEYS.settings),
             this.loadDataWithLegacyFallback(KEYS.ai),
             this.loadDataWithLegacyFallback(KEYS.dailyReports),
+            this.plugin.loadData(KEYS.extras),
+            this.plugin.loadData(KEYS.fulltexts),
         ]);
         const subStore = this.normalizeSubStore(s);
         this.subs = subStore.items;
@@ -90,12 +131,67 @@ export class Storage {
         if (dr && typeof dr === "object" && !Array.isArray(dr)) {
             this.dailyReports = dr as Record<string, DailyReportCache>;
         }
+        if (ex && typeof ex === "object" && !Array.isArray(ex)) this.extras = ex;
+        if (ft && typeof ft === "object" && !Array.isArray(ft)) this.fulltexts = ft;
+        let migratedLegacy = false;
         for (const a of this.articles.values()) {
             a.isRead = this.read.has(a.id);
             a.isStarred = this.star.has(a.id);
+            // 旧数据特征：主表数组里直接带大字段（水合前判断，避免把新格式误判为旧格式）
+            const hadLegacy = !!(a.fullText || a.aiResults || a.highlights || a.tags || a.savedDocId !== undefined || a.savedAt !== undefined);
+            // 从拆分键水合大字段（内存对象形态不变，其他模块零改动）
+            const ftRec = this.fulltexts[a.id];
+            if (ftRec) { a.fullText = ftRec.text; a.fullTextState = ftRec.state; }
+            const exRec = this.extras[a.id];
+            if (exRec) {
+                a.savedDocId = exRec.savedDocId;
+                a.savedAt = exRec.savedAt;
+                a.tags = exRec.tags;
+                a.aiResults = exRec.aiResults;
+                a.highlights = exRec.highlights;
+            }
+            // 旧数据：大字段仍在主表里 → 拆出来，稍后回写瘦身主表
+            if (hadLegacy) {
+                this.pullHeavyFields(a);
+                migratedLegacy = true;
+            }
+        }
+        if (migratedLegacy) {
+            this.scheduleSave(KEYS.articles, this.serializeArticles());
+            this.scheduleSave(KEYS.extras, this.extras);
+            this.scheduleSave(KEYS.fulltexts, this.fulltexts);
         }
         // 数据加载完成后通知已挂载的 UI 刷新（首次进入时 Tab 可能先于数据就绪渲染）
         this.emit();
+    }
+
+    /** 把文章对象上的大字段抽到拆分键；有抽取时返回 true（不产生空记录） */
+    private pullHeavyFields(a: Article): boolean {
+        let touched = false;
+        let ex: ArticleExtras | undefined;
+        const getEx = () => ex || (ex = this.extras[a.id] || (this.extras[a.id] = {}));
+        if (a.savedDocId !== undefined || a.savedAt !== undefined) {
+            getEx().savedDocId = a.savedDocId;
+            getEx().savedAt = a.savedAt;
+            touched = true;
+        }
+        if (a.tags) { getEx().tags = a.tags; touched = true; }
+        if (a.aiResults) { getEx().aiResults = a.aiResults; touched = true; }
+        if (a.highlights) { getEx().highlights = a.highlights; touched = true; }
+        if (a.fullText) {
+            this.fulltexts[a.id] = { text: a.fullText, state: a.fullTextState };
+            touched = true;
+        }
+        return touched;
+    }
+
+    /** articles 主表只持久化轻量字段，大字段由 extras/fulltexts 键承载 */
+    private serializeArticles(): Article[] {
+        return Array.from(this.articles.values()).map((a) => {
+            const { fullText, fullTextState, aiResults, highlights, savedDocId, savedAt, tags, ...rest } = a;
+            void fullText; void fullTextState; void aiResults; void highlights; void savedDocId; void savedAt; void tags;
+            return rest as Article;
+        });
     }
 
     private async loadDataWithLegacyFallback(key: string): Promise<any> {
@@ -146,7 +242,7 @@ export class Storage {
         return JSON.parse(JSON.stringify(data)) as T;
     }
 
-    private async save(key: string, data: any) {
+    private async persist(key: string, data: any) {
         const snapshot = this.snapshot(data);
         const prev = this.saveQueues.get(key) || Promise.resolve();
         const next = prev
@@ -160,6 +256,32 @@ export class Storage {
         this.saveQueues.set(key, next);
         await next;
         if (this.saveQueues.get(key) === next) this.saveQueues.delete(key);
+    }
+
+    private pendingSaves: Map<string, { data: any; timer: number }> = new Map();
+
+    /** 同 key 写合并：窗口内的多次变更只以最终值落盘一次（用于 articles/extras/fulltexts 重键） */
+    private scheduleSave(key: string, data: any) {
+        const existing = this.pendingSaves.get(key);
+        if (existing) {
+            existing.data = data;
+            return;
+        }
+        const entry = { data, timer: 0 };
+        entry.timer = window.setTimeout(() => {
+            this.pendingSaves.delete(key);
+            this.persist(key, entry.data).catch(() => { /* */ });
+        }, SCHEDULED_SAVE_MS);
+        this.pendingSaves.set(key, entry);
+    }
+
+    /** 立即落盘所有待合并写入（插件卸载时调用，尽力而为） */
+    flushSaves() {
+        for (const [key, entry] of this.pendingSaves) {
+            window.clearTimeout(entry.timer);
+            this.pendingSaves.delete(key);
+            this.persist(key, entry.data);
+        }
     }
 
     // ===== subs =====
@@ -278,11 +400,12 @@ export class Storage {
         this.saveQueues.set(KEYS.subs, next);
         await next;
         if (this.saveQueues.get(KEYS.subs) === next) this.saveQueues.delete(KEYS.subs);
-        if (options.emit !== false) this.emit();
+        if (options.emit !== false) this.emit("subs");
         return nextItems;
     }
 
-    getSubs() { return [...this.subs].sort((a, b) => a.sortOrder - b.sortOrder); }
+    /** 内部不变量：this.subs 始终按 sortOrder 有序（normalizeSubs 保证），getter 只做浅拷贝 */
+    getSubs(): Subscription[] { return this.subs.slice(); }
     getSub(id: string) { return this.subs.find((s) => s.id === id); }
     resolveSubCategoryId(sub: Subscription): string | undefined {
         if (sub.categoryId && this.cats.some((cat) => cat.id === sub.categoryId)) return sub.categoryId;
@@ -365,17 +488,8 @@ export class Storage {
             }
             return items.filter((s) => s.id !== id);
         });
-        for (const [aid, a] of this.articles) {
-            if (a.subscriptionId === id) {
-                this.articles.delete(aid);
-                this.read.delete(aid);
-                this.star.delete(aid);
-            }
-        }
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        await this.save(KEYS.read, Array.from(this.read));
-        await this.save(KEYS.star, Array.from(this.star));
-        this.emit();
+        this.persistRemovedArticles(new Set([id]));
+        this.emit("articles");
     }
     async moveSubs(ids: string[], categoryId?: string) {
         const set = new Set(ids);
@@ -392,59 +506,110 @@ export class Storage {
             items.forEach((s) => { if (set.has(s.id)) this.subStoreMeta.deletedUrls![this.normalizeUrl(s.url)] = now; });
             return items.filter((s) => !set.has(s.id));
         });
+        this.persistRemovedArticles(set);
+        this.emit("articles");
+    }
+    /** 移除指定订阅源的文章及其大字段，重键走写合并 */
+    private persistRemovedArticles(subIds: Set<string>) {
+        const removed: string[] = [];
         for (const [aid, a] of this.articles) {
-            if (set.has(a.subscriptionId)) {
+            if (subIds.has(a.subscriptionId)) {
                 this.articles.delete(aid);
                 this.read.delete(aid);
                 this.star.delete(aid);
+                removed.push(aid);
             }
         }
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        await this.save(KEYS.read, Array.from(this.read));
-        await this.save(KEYS.star, Array.from(this.star));
-        this.emit();
+        this.persist(KEYS.read, Array.from(this.read));
+        this.persist(KEYS.star, Array.from(this.star));
+        if (removed.length) {
+            for (const aid of removed) {
+                delete this.extras[aid];
+                delete this.fulltexts[aid];
+            }
+            this.invalidateSortedArticles();
+            this.scheduleSave(KEYS.articles, this.serializeArticles());
+            this.scheduleSave(KEYS.extras, this.extras);
+            this.scheduleSave(KEYS.fulltexts, this.fulltexts);
+        }
     }
     async clearSubscriptions(options: { clearCategories?: boolean } = {}) {
         this.subs = [];
         this.articles.clear();
         this.read.clear();
         this.star.clear();
+        this.extras = {};
+        this.fulltexts = {};
+        this.invalidateSortedArticles();
         await this.commitSubs(() => [], { mergeCurrent: false, emit: false });
         if (options.clearCategories) {
             this.cats = [this.defaultCat()];
-            await this.save(KEYS.cats, this.cats);
+            await this.persist(KEYS.cats, this.cats);
         }
-        await this.save(KEYS.articles, []);
-        await this.save(KEYS.read, []);
-        await this.save(KEYS.star, []);
-        this.emit();
+        this.persist(KEYS.read, []);
+        this.persist(KEYS.star, []);
+        this.scheduleSave(KEYS.articles, this.serializeArticles());
+        this.emit("articles");
     }
 
     // ===== cats =====
-    getCats() { return [...this.cats].sort((a, b) => a.sortOrder - b.sortOrder); }
+    /** 内部不变量：this.cats 始终按 sortOrder 有序（upsert/remove/load 维护），getter 只做浅拷贝 */
+    getCats(): Category[] { return this.cats.slice(); }
     async upsertCat(c: Category) {
         const old = this.cats.find((x) => x.id === c.id);
         const i = this.cats.findIndex((x) => x.id === c.id);
         if (i >= 0) this.cats[i] = c; else this.cats.push(c);
-        await this.save(KEYS.cats, this.cats);
+        this.cats.sort((a, b) => a.sortOrder - b.sortOrder);
+        await this.persist(KEYS.cats, this.cats);
         if (old && old.name !== c.name) {
             await this.commitSubs((items) => items.map((sub) => sub.categoryId === c.id ? { ...sub, categoryName: c.name, updatedAt: Date.now() } : sub), { emit: false });
         }
-        this.emit();
+        this.emit("cats");
     }
     async removeCat(id: string) {
         if (this.cats.find((c) => c.id === id)?.builtin) return;
         this.cats = this.cats.filter((c) => c.id !== id);
-        await this.save(KEYS.cats, this.cats);
+        await this.persist(KEYS.cats, this.cats);
         await this.commitSubs((items) => items.map((s) => s.categoryId === id ? { ...s, categoryId: undefined, categoryName: undefined, updatedAt: Date.now() } : s), { emit: false });
-        this.emit();
+        this.emit("cats");
     }
 
     // ===== articles =====
+    /** 排序 pubDate 倒序缓存，插入/删除时失效，避免每次 getArticles 全量排序 */
+    private sortedArticles: Article[] | null = null;
+    /** upsertArticles 内过期清理的限频时间戳 */
+    private lastPruneAt = 0;
+
     getArticles(sid?: string): Article[] {
-        const all = Array.from(this.articles.values());
-        const list = sid ? all.filter((a) => a.subscriptionId === sid) : all;
-        return list.sort((a, b) => b.pubDate - a.pubDate);
+        let sorted = this.sortedArticles;
+        if (!sorted) {
+            sorted = Array.from(this.articles.values()).sort((a, b) => b.pubDate - a.pubDate);
+            this.sortedArticles = sorted;
+        }
+        if (sid) return sorted.filter((a) => a.subscriptionId === sid);
+        return [...sorted];
+    }
+    /** 文章集合变动后失效排序缓存 */
+    private invalidateSortedArticles() { this.sortedArticles = null; }
+
+    /** 单遍统计：总量/未读/今天/星标/日期数/每订阅未读数，替代 per-sub 的 O(n) 全扫 */
+    articleStats(): ArticleStats {
+        const now = Date.now();
+        const todayCutoff = now - 86400_000;
+        const dates = new Set<string>();
+        const unreadBySub = new Map<string, number>();
+        let total = 0, totalUnread = 0, todayUnread = 0, starred = 0;
+        for (const a of this.articles.values()) {
+            total++;
+            dates.add(dateKey(a.pubDate));
+            if (a.isStarred) starred++;
+            if (!a.isRead) {
+                totalUnread++;
+                if (a.pubDate >= todayCutoff) todayUnread++;
+                unreadBySub.set(a.subscriptionId, (unreadBySub.get(a.subscriptionId) || 0) + 1);
+            }
+        }
+        return { total, totalUnread, todayUnread, starred, dateCount: dates.size, unreadBySub };
     }
     getArticle(id: string) { return this.articles.get(id); }
     async upsertArticles(list: Omit<Article, "isRead" | "isStarred">[]) {
@@ -454,6 +619,7 @@ export class Storage {
             if (ex) {
                 a.isRead = ex.isRead; a.isStarred = ex.isStarred;
                 a.savedDocId = ex.savedDocId; a.savedAt = ex.savedAt;
+                a.tags = a.tags || ex.tags;
                 a.aiResults = a.aiResults || ex.aiResults;
                 a.highlights = a.highlights || ex.highlights;
                 a.fullText = a.fullText || ex.fullText;
@@ -463,15 +629,27 @@ export class Storage {
                 a.isStarred = this.star.has(a.id);
             }
             this.articles.set(a.id, a as Article);
+            // 新导入文章若自带大字段（全文/AI 结果等），拆到独立键，保持主表轻量
+            this.pullHeavyFields(a);
         }
-        const removed = this.pruneExpiredArticles(false);
-        if (removed) await this.save(KEYS.read, Array.from(this.read));
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        this.emit();
+        // 过期清理最多每小时跑一次（全量清理由 tab 初始化时的 cleanupExpiredArticles 兜底），
+        // 避免高频刷新每次 upsert 都全扫文章表
+        if (Date.now() - this.lastPruneAt > 3_600_000) {
+            this.lastPruneAt = Date.now();
+            const removed = this.pruneExpiredArticles(false);
+            for (const id of removed) {
+                delete this.extras[id];
+                delete this.fulltexts[id];
+            }
+            if (removed.length) this.persist(KEYS.read, Array.from(this.read));
+        }
+        this.invalidateSortedArticles();
+        this.scheduleSave(KEYS.articles, this.serializeArticles());
+        this.emit("articles");
     }
-    private pruneExpiredArticles(emit = true) {
+    private pruneExpiredArticles(emit = true): string[] {
         const days = Number(this.settings.general.articleRetentionDays ?? DEFAULT_SETTINGS.general.articleRetentionDays);
-        if (!Number.isFinite(days) || days <= 0) return 0;
+        if (!Number.isFinite(days) || days <= 0) return [];
         const cutoff = Date.now() - Math.max(1, days) * 86400_000;
         const removed: string[] = [];
         for (const [id, article] of this.articles.entries()) {
@@ -483,11 +661,16 @@ export class Storage {
                 removed.push(id);
             }
         }
-        if (removed.length && emit) this.emit();
-        return removed.length;
+        if (removed.length && emit) this.emit("articles");
+        return removed;
     }
     async cleanupExpiredArticles() {
+        this.lastPruneAt = Date.now();
         const removed = this.pruneExpiredArticles(false);
+        for (const id of removed) {
+            delete this.extras[id];
+            delete this.fulltexts[id];
+        }
         let dailyRemoved = 0;
         const cutoff = Date.now() - 30 * 86400_000;
         for (const [date, report] of Object.entries(this.dailyReports)) {
@@ -496,35 +679,38 @@ export class Storage {
                 dailyRemoved++;
             }
         }
-        if (!removed && !dailyRemoved) return 0;
-        await this.save(KEYS.read, Array.from(this.read));
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        if (dailyRemoved) await this.save(KEYS.dailyReports, this.dailyReports);
-        this.emit();
-        return removed;
+        if (!removed.length && !dailyRemoved) return 0;
+        this.persist(KEYS.read, Array.from(this.read));
+        this.invalidateSortedArticles();
+        this.scheduleSave(KEYS.articles, this.serializeArticles());
+        if (removed.length) {
+            this.scheduleSave(KEYS.extras, this.extras);
+            this.scheduleSave(KEYS.fulltexts, this.fulltexts);
+        }
+        if (dailyRemoved) this.persist(KEYS.dailyReports, this.dailyReports);
+        this.emit("articles");
+        return removed.length;
     }
 
-    getDailyReport(date: string): DailyReportCache | undefined {
-        return this.dailyReports[date];
+    /** 把文章对象当前的字段值同步到 extras 记录（供拆分键持久化） */
+    private syncExtras(id: string) {
+        const a = this.articles.get(id);
+        if (!a) return;
+        const ex = this.extras[id] || (this.extras[id] = {});
+        ex.savedDocId = a.savedDocId;
+        ex.savedAt = a.savedAt;
+        ex.tags = a.tags;
+        ex.aiResults = a.aiResults;
+        ex.highlights = a.highlights;
     }
-    async saveDailyReport(date: string, report: DailyReportCache) {
-        this.dailyReports = { ...this.dailyReports, [date]: report };
-        await this.save(KEYS.dailyReports, this.dailyReports);
-    }
-    async removeDailyReport(date: string) {
-        if (!this.dailyReports[date]) return;
-        const next = { ...this.dailyReports };
-        delete next[date];
-        this.dailyReports = next;
-        await this.save(KEYS.dailyReports, this.dailyReports);
-    }
+
     async setRead(id: string, v: boolean) {
         const a = this.articles.get(id); if (!a) return;
         a.isRead = v;
         if (v) this.read.add(id); else this.read.delete(id);
-        await this.save(KEYS.read, Array.from(this.read));
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        this.emit();
+        // isRead 加载时由 read 集合推导，无需再写 articles 主表
+        await this.persist(KEYS.read, Array.from(this.read));
+        this.emit("read");
     }
     async markRead(ids: string[], v = true) {
         const set = new Set(ids);
@@ -537,17 +723,16 @@ export class Storage {
             changed = true;
         }
         if (!changed) return;
-        await this.save(KEYS.read, Array.from(this.read));
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        this.emit();
+        this.persist(KEYS.read, Array.from(this.read));
+        this.emit("read");
     }
     async setStar(id: string, v: boolean) {
         const a = this.articles.get(id); if (!a) return;
         a.isStarred = v;
         if (v) this.star.add(id); else this.star.delete(id);
-        await this.save(KEYS.star, Array.from(this.star));
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        this.emit();
+        // isStarred 加载时由 star 集合推导，无需再写 articles 主表
+        await this.persist(KEYS.star, Array.from(this.star));
+        this.emit("star");
     }
     async setArticleFullText(id: string, fullText?: string | null) {
         const a = this.articles.get(id);
@@ -555,42 +740,52 @@ export class Storage {
         if (fullText) {
             a.fullText = fullText;
             a.fullTextState = "fetched";
+            this.fulltexts[id] = { text: fullText, state: "fetched" };
         } else {
             delete a.fullText;
             delete a.fullTextState;
+            delete this.fulltexts[id];
         }
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        this.emit();
+        this.scheduleSave(KEYS.fulltexts, this.fulltexts);
+        this.emit("fulltext");
     }
 
     async setAIResult(id: string, promptId: string, r: any) {
         const a = this.articles.get(id); if (!a) return;
         if (!a.aiResults) a.aiResults = {};
         a.aiResults[promptId] = r;
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
+        this.syncExtras(id);
+        this.scheduleSave(KEYS.extras, this.extras);
+        this.emit("extras");
     }
     async setSaved(id: string, docId: string) {
         const a = this.articles.get(id); if (!a) return;
         a.savedDocId = docId; a.savedAt = Date.now();
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
+        this.syncExtras(id);
+        this.scheduleSave(KEYS.extras, this.extras);
+        this.emit("extras");
     }
     async setTags(id: string, tags: string[]) {
         const a = this.articles.get(id); if (!a) return;
         a.tags = tags;
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
+        this.syncExtras(id);
+        this.scheduleSave(KEYS.extras, this.extras);
+        this.emit("extras");
     }
     async addHighlight(articleId: string, h: any) {
         const a = this.articles.get(articleId); if (!a) return;
         if (!a.highlights) a.highlights = [];
         a.highlights.push(h);
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        this.emit();
+        this.syncExtras(articleId);
+        this.scheduleSave(KEYS.extras, this.extras);
+        this.emit("extras");
     }
     async removeHighlight(articleId: string, hid: string) {
         const a = this.articles.get(articleId); if (!a?.highlights) return;
         a.highlights = a.highlights.filter((h) => h.id !== hid);
-        await this.save(KEYS.articles, Array.from(this.articles.values()));
-        this.emit();
+        this.syncExtras(articleId);
+        this.scheduleSave(KEYS.extras, this.extras);
+        this.emit("extras");
     }
 
     unreadCount(sid?: string): number {
@@ -606,23 +801,39 @@ export class Storage {
     getSettings() { return this.settings; }
     async setSettings(s: Settings) {
         this.settings = s;
-        await this.save(KEYS.settings, s);
-        this.emit();
+        await this.persist(KEYS.settings, s);
+        this.emit("settings");
     }
     updateSettings(patch: Partial<Settings>, options: { emit?: boolean } = {}) {
         this.settings = { ...this.settings, ...patch };
-        this.save(KEYS.settings, this.settings);
-        if (options.emit !== false) this.emit();
+        this.persist(KEYS.settings, this.settings);
+        if (options.emit !== false) this.emit("settings");
     }
     getAI() { return this.ai; }
     async setAI(a: AISettings) {
         this.ai = a;
-        await this.save(KEYS.ai, a);
-        this.emit();
+        await this.persist(KEYS.ai, a);
+        this.emit("ai");
     }
     updateAI(patch: Partial<AISettings>) {
         this.ai = { ...this.ai, ...patch };
-        this.save(KEYS.ai, this.ai);
-        this.emit();
+        this.persist(KEYS.ai, this.ai);
+        this.emit("ai");
+    }
+    getDailyReport(date: string): DailyReportCache | undefined {
+        return this.dailyReports[date];
+    }
+    async saveDailyReport(date: string, report: DailyReportCache) {
+        this.dailyReports = { ...this.dailyReports, [date]: report };
+        await this.persist(KEYS.dailyReports, this.dailyReports);
+        this.emit("daily");
+    }
+    async removeDailyReport(date: string) {
+        if (!this.dailyReports[date]) return;
+        const next = { ...this.dailyReports };
+        delete next[date];
+        this.dailyReports = next;
+        await this.persist(KEYS.dailyReports, this.dailyReports);
+        this.emit("daily");
     }
 }

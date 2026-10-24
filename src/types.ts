@@ -13,6 +13,10 @@ export interface DailyReportSettings {
     concurrency?: number;
     /** 今日速览是否显示文章链接（默认 true） */
     showLinks?: boolean;
+    /** 深读阶段是否按篇截断正文（默认 true） */
+    truncateContent?: boolean;
+    /** 每篇保留的纯文本字符数上限（默认 6000，0 = 不截断） */
+    truncateChars?: number;
 }
 
 export interface Category {
@@ -114,6 +118,21 @@ export interface Settings {
     save: { template: string; includeSourceLink: boolean; downloadImages: boolean; cleanLinks?: boolean; defaultNotebook?: string; folderTemplate?: string; pathsByNotebook?: Record<string, string>; };
 }
 
+// 文章附属大字段：按文章 id 拆出主表持久化，避免整表重写
+export interface ArticleExtras {
+    savedDocId?: ID;
+    savedAt?: number;
+    tags?: string[];
+    aiResults?: Record<string, AIResult>;
+    highlights?: Highlight[];
+}
+
+// 抓取全文记录：全文 HTML 体积大，独立键存储
+export interface FullTextRecord {
+    text: string;
+    state?: "pending" | "fetched" | "failed";
+}
+
 // 持久化 key
 export const KEYS = {
     subs: "ai_rss_subs",
@@ -124,6 +143,8 @@ export const KEYS = {
     settings: "ai_rss_settings",
     ai: "ai_rss_ai",
     dailyReports: "ai_rss_daily_reports",
+    extras: "ai_rss_article_extras",
+    fulltexts: "ai_rss_full_texts",
 } as const;
 
 // 默认值

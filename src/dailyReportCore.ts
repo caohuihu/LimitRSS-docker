@@ -14,6 +14,8 @@ export const DEFAULT_DAILY_REPORT: Required<DailyReportSettings> = {
     batchSize: 10,
     concurrency: 2,
     showLinks: true,
+    truncateContent: true,
+    truncateChars: 6000,
 };
 
 export interface PanoramaArticle {
@@ -175,8 +177,10 @@ export function buildDeepDiveBatches<T>(selected: T[], batchSize: number): T[][]
     return out;
 }
 
-/** 单个深读批次的提示词：本地编号 + 标题/链接/全文（优先 content，回退 description） */
-export function buildDeepDivePrompt(date: string, batch: DeepDiveArticle[], batchIndex: number): string {
+/** 单个深读批次的提示词：本地编号 + 标题/链接/全文（优先 content，回退 description）；
+ *  可选按篇截断正文，避免长文撑爆上下文与 token */
+export function buildDeepDivePrompt(date: string, batch: DeepDiveArticle[], batchIndex: number, opts: { truncateChars?: number } = {}): string {
+    const maxChars = Math.max(0, Math.floor(opts.truncateChars || 0));
     const lines = batch.map((a, i) => {
         // 优先使用全文 content，回退到摘要 description；对 HTML 内容先提取纯文本再截断
         const raw = a.content || a.description || "";
@@ -187,6 +191,9 @@ export function buildDeepDivePrompt(date: string, batch: DeepDiveArticle[], batc
             text = (tmp.textContent || "").replace(/\s+/g, " ").trim();
         } else {
             text = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+        }
+        if (maxChars > 0 && text.length > maxChars) {
+            text = text.slice(0, maxChars) + " […过长已截断]";
         }
         return [
             `编号：${i + 1}`,

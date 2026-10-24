@@ -6,11 +6,11 @@
 import { el, clear, on, escapeHtml, iconLabel, debounce } from "./ui";
 import { icon as makeIcon, renderFavicon } from "./icons";
 import { button, dropdown, DropdownItem, toast, modal, empty, spinner } from "./components";
-import { Storage } from "./storage";
+import { Storage, ArticleStats } from "./storage";
 import { AIService } from "./ai";
 import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category, DailyReportSettings } from "./types";
 import { DEFAULT_DAILY_REPORT, articleSetHash, buildDeepDiveBatches, buildDeepDivePrompt, buildPanoramaPrompt, composeFinalReport, mapChunkCitations, normalizeDeepBatchMarkdown, runWithConcurrency, selectTopArticles, splitPanoramaArticles, stripCitationMarkers, stripSelectionSection, type DeepBatchResult, type DeepDiveArticle } from "./dailyReportCore";
-import { fetchAndParse, resolveSubscriptionFavicon, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
+import { fetchAndParse, resolveSubscriptionFavicon, listRSSHubInstances, normalizeRSSHubBaseUrl, ParsedFeed } from "./fetcher";
 import { fetchFullText } from "./fulltext";
 import { renderFolderTemplate, saveMarkdownToSiyuan, saveToSiyuan } from "./save";
 import { openFaviconDialog } from "./favicon";
@@ -21,16 +21,18 @@ import { applyCategoryToggle, applySubToggle, categoryCheckState, scopePanelNeed
 import { createPathsMemory, PathMemory } from "./saveTargetStore";
 import { stripMarkdownLinks } from "./markdownClean";
 import DOMPurify from "dompurify";
-import { genId } from "./util";
+import { genId, dateKey } from "./util";
 
 // =============== 工具 ===============
 
+const SANITIZE_CONFIG = {
+    ALLOWED_TAGS: ["a", "b", "blockquote", "br", "code", "div", "em", "figure", "figcaption", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "span", "strong", "sub", "sup", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"],
+    ALLOWED_ATTR: ["href", "title", "alt", "src", "class", "target", "rel"],
+};
+
 function sanitize(html: string): string {
     if (!html) return "";
-    return DOMPurify.sanitize(html, {
-        ALLOWED_TAGS: ["a", "b", "blockquote", "br", "code", "div", "em", "figure", "figcaption", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "span", "strong", "sub", "sup", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"],
-        ALLOWED_ATTR: ["href", "title", "alt", "src", "class", "target", "rel"],
-    }) as string;
+    return DOMPurify.sanitize(html, SANITIZE_CONFIG) as string;
 }
 
 /** 显示端去重：完全相同的文本段落只保留第一处（处理部分源图文重复） */
@@ -79,21 +81,52 @@ function articleId(subId: string, link: string): string {
     return "art_" + (h >>> 0).toString(36);
 }
 
+/** timeAgo 按分钟桶缓存：同一分钟内文案不变，跨分钟清空重算 */
+const timeAgoCache: { at: number; map: Map<number, string> } = { at: 0, map: new Map() };
 function timeAgo(ts: number): string {
-    const diff = Date.now() - ts;
-    const m = 60_000, h = 3_600_000, d = 86_400_000;
-    if (diff < m) return "刚刚";
-    if (diff < h) return Math.floor(diff / m) + " 分钟前";
-    if (diff < d) return Math.floor(diff / h) + " 小时前";
-    if (diff < 7 * d) return Math.floor(diff / d) + " 天前";
-    return new Date(ts).toLocaleDateString("zh-CN");
+    const nowMin = Math.floor(Date.now() / 60_000);
+    if (nowMin !== timeAgoCache.at) {
+        timeAgoCache.at = nowMin;
+        timeAgoCache.map.clear();
+    }
+    let out = timeAgoCache.map.get(ts);
+    if (out === undefined) {
+        const diff = Date.now() - ts;
+        const m = 60_000, h = 3_600_000, d = 86_400_000;
+        if (diff < m) out = "刚刚";
+        else if (diff < h) out = Math.floor(diff / m) + " 分钟前";
+        else if (diff < d) out = Math.floor(diff / h) + " 小时前";
+        else if (diff < 7 * d) out = Math.floor(diff / d) + " 天前";
+        else out = new Date(ts).toLocaleDateString("zh-CN");
+        timeAgoCache.map.set(ts, out);
+    }
+    return out;
 }
 
-function estimateReadingTime(text: string): number {
+/** 日期分组标签（同一 ts 的文案不变），避免列表每次渲染逐条 toLocaleDateString */
+const dayLabelCache = new Map<number, string>();
+function dayLabel(ts: number): string {
+    let s = dayLabelCache.get(ts);
+    if (s === undefined) {
+        s = new Date(ts).toLocaleDateString("zh-CN");
+        dayLabelCache.set(ts, s);
+        if (dayLabelCache.size > 5000) dayLabelCache.clear();
+    }
+    return s;
+}
+
+const readingTimeCache = new WeakMap<object, number>();
+function estimateReadingTime(text: string, key?: object): number {
+    if (key) {
+        const hit = readingTimeCache.get(key);
+        if (hit !== undefined) return hit;
+    }
     if (!text) return 0;
     const cn = (text.match(/[一-鿿]/g) || []).length;
     const en = (text.match(/[a-zA-Z]+/g) || []).length;
-    return Math.max(1, Math.ceil((cn / 4 + en) / 300));
+    const n = Math.max(1, Math.ceil((cn / 4 + en) / 300));
+    if (key) readingTimeCache.set(key, n);
+    return n;
 }
 
 const QUICK_AI_PROMPTS: PromptTemplate[] = [
@@ -130,14 +163,6 @@ const DAILY_REPORT_PROMPT: PromptTemplate = {
     systemPrompt: "你是专业资讯编辑，擅长把 RSS 文章整理成简洁日报。",
     userPrompt: "{{content}}",
 };
-
-function dateKey(ts: number): string {
-    const d = new Date(ts);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
-}
 
 function displayDate(key: string): string {
     return new Date(`${key}T00:00:00`).toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
@@ -203,14 +228,10 @@ function buildTranslatableHtml(sourceHtml: string, startId = 1): { html: string;
         wrap.className = "ar-rd__translate-segment";
         wrap.dataset.segId = String(id);
         wrap.dataset.original = text;
+        // 整段一个文本节点：原文淡出用 CSS 过渡整段完成，避免逐字符建 DOM
         const original = document.createElement("span");
         original.className = "ar-rd__translate-original";
-        for (const char of Array.from(text)) {
-            const charEl = document.createElement("span");
-            charEl.className = "ar-rd__translate-char";
-            charEl.textContent = char;
-            original.appendChild(charEl);
-        }
+        original.textContent = text;
         wrap.appendChild(original);
         node.parentNode?.replaceChild(wrap, node);
     });
@@ -220,8 +241,7 @@ function buildTranslatableHtml(sourceHtml: string, startId = 1): { html: string;
 
 function buildTranslatableTitleHtml(title: string): string {
     const text = title || "(无标题)";
-    const chars = Array.from(text).map((char) => `<span class="ar-rd__translate-char">${escapeHtml(char)}</span>`).join("");
-    return `<span class="ar-rd__translate-segment" data-seg-id="1" data-original="${escapeAttr(text)}"><span class="ar-rd__translate-original">${chars}</span></span>`;
+    return `<span class="ar-rd__translate-segment" data-seg-id="1" data-original="${escapeAttr(text)}"><span class="ar-rd__translate-original">${escapeHtml(text)}</span></span>`;
 }
 
 function translatedHtmlFromSource(source: HTMLElement): string {
@@ -305,28 +325,34 @@ class Sidebar {
     private feedsScrollTop = 0;
     private renderFrame: number | null = null;
     private lastRenderSignature = "";
+    private unsubscribers: (() => void)[] = [];
 
     constructor(root: HTMLElement, storage: Storage, onChange: (id: string) => void) {
         this.root = root;
         this.storage = storage;
         this.onChange = onChange;
-        storage.on(() => this.requestRender());
+        this.unsubscribers.push(storage.on(() => this.requestRender()));
         this.render();
+    }
+
+    destroy() {
+        if (this.renderFrame !== null) {
+            window.cancelAnimationFrame(this.renderFrame);
+            this.renderFrame = null;
+        }
+        this.unsubscribers.forEach((fn) => fn());
+        this.unsubscribers = [];
     }
 
     private signature() {
         const subs = this.storage.getSubs();
         const cats = this.storage.getCats();
-        const articles = this.storage.getArticles();
-        const totalUnread = this.storage.totalUnread();
-        const todayUnread = articles.filter((a) => !a.isRead && Date.now() - a.pubDate < 86400_000).length;
-        const starred = articles.filter((a) => a.isStarred).length;
-        const dailyDates = new Set(articles.map((a) => dateKey(a.pubDate))).size;
+        const stats = this.storage.articleStats();
         return JSON.stringify({
             active: this.active,
-            smart: [articles.length, totalUnread, todayUnread, starred, dailyDates],
+            smart: [stats.total, stats.totalUnread, stats.todayUnread, stats.starred, stats.dateCount],
             cats: cats.map((cat) => [cat.id, cat.name, cat.sortOrder]),
-            subs: subs.map((sub) => [sub.id, sub.name, sub.categoryId || "", sub.categoryName || "", sub.enabled, sub.errorCount, sub.favicon || "", sub.customFavicon || "", this.storage.unreadCount(sub.id)]),
+            subs: subs.map((sub) => [sub.id, sub.name, sub.categoryId || "", sub.categoryName || "", sub.enabled, sub.errorCount, sub.favicon || "", sub.customFavicon || "", stats.unreadBySub.get(sub.id) || 0]),
         });
     }
 
@@ -365,26 +391,23 @@ class Sidebar {
 
         // 智能分组
         const smart = el("div", { class: "ar-side__section ar-side__section--smart" });
-        const totalUnread = this.storage.totalUnread();
-        const todayUnread = this.storage.getArticles().filter((a) => !a.isRead && Date.now() - a.pubDate < 86400_000).length;
-        const starred = this.storage.getArticles().filter((a) => a.isStarred).length;
-        const dailyDates = new Set(this.storage.getArticles().map((a) => dateKey(a.pubDate))).size;
+        const stats = this.storage.articleStats();
         [
-            { id: "all", label: "全部", icon: "list", count: this.storage.getArticles().length },
-            { id: "unread", label: "未读", icon: "bell", count: totalUnread },
-            { id: "today", label: "今天", icon: "inbox", count: todayUnread },
-            { id: "starred", label: "星标", icon: "star", count: starred },
-            { id: "daily", label: "AI 日报", icon: "wand", count: dailyDates },
+            { id: "all", label: "全部", icon: "list", count: stats.total },
+            { id: "unread", label: "未读", icon: "bell", count: stats.totalUnread },
+            { id: "today", label: "今天", icon: "inbox", count: stats.todayUnread },
+            { id: "starred", label: "星标", icon: "star", count: stats.starred },
+            { id: "daily", label: "AI 日报", icon: "wand", count: stats.dateCount },
         ].forEach((g) => smart.appendChild(this.renderGroup(g.id, g.label, g.icon, g.count)));
         this.root.appendChild(smart);
 
         // 分类 + 订阅
         const subsSection = el("div", { class: "ar-side__section ar-side__section--feeds" });
         const noCat = subs.filter((s) => !this.storage.resolveSubCategoryId(s));
-        if (noCat.length) subsSection.appendChild(this.renderCategory("c_default", "未分类", noCat));
+        if (noCat.length) subsSection.appendChild(this.renderCategory("c_default", "未分类", noCat, stats));
         cats.filter((c) => c.id !== "c_default").forEach((c) => {
             const list = subs.filter((s) => this.storage.resolveSubCategoryId(s) === c.id);
-            subsSection.appendChild(this.renderCategory(c.id, c.name, list));
+            subsSection.appendChild(this.renderCategory(c.id, c.name, list, stats));
         });
         this.root.appendChild(subsSection);
         subsSection.scrollTop = this.feedsScrollTop;
@@ -413,9 +436,9 @@ class Sidebar {
         ].filter(Boolean) as HTMLElement[]);
     }
 
-    renderCategory(catId: string, catName: string, subs: Subscription[]) {
+    renderCategory(catId: string, catName: string, subs: Subscription[], stats: ArticleStats) {
         const wrap = el("div", { class: "ar-side__cat" });
-        const unread = subs.reduce((sum, s) => sum + this.storage.unreadCount(s.id), 0);
+        const unread = subs.reduce((sum, s) => sum + (stats.unreadBySub.get(s.id) || 0), 0);
         const head = el("button", {
             class: `ar-side__cat-head ${this.active === catId ? "ar-side__cat-head--active" : ""}`,
             onclick: () => { this.active = catId; this.onChange(catId); this.render(); },
@@ -425,13 +448,13 @@ class Sidebar {
             button({ variant: "icon", size: "xs", icon: "more", title: "更多", onclick: (e) => { this.openCatMenu(e.currentTarget as HTMLElement, catId, catName, e); } }),
         ]);
         wrap.appendChild(head);
-        subs.forEach((s) => wrap.appendChild(this.renderSub(s)));
+        subs.forEach((s) => wrap.appendChild(this.renderSub(s, stats)));
         return wrap;
     }
 
-    renderSub(s: Subscription) {
+    renderSub(s: Subscription, stats: ArticleStats) {
         const isActive = this.active === s.id;
-        const unread = this.storage.unreadCount(s.id);
+        const unread = stats.unreadBySub.get(s.id) || 0;
         const logoUrl = s.customFavicon || s.favicon || fallbackFavicon(s.siteUrl || s.url);
         const logo = renderFavicon(logoUrl, `ar-side__sub-logo ${s.errorCount > 0 ? "ar-side__sub-logo--err" : ""}`, 11);
         return el("button", {
@@ -1173,6 +1196,10 @@ class ArticleListView {
     private searchTimer: ReturnType<typeof setTimeout> | null = null;
     private pendingRenderAfterComposition = false;
     private restoreSearchFocus = false;
+    private unsubscribers: (() => void)[] = [];
+    private renderFrame: number | null = null;
+    /** 小写搜索索引（标题+摘要），随 articles 事件失效，避免每次输入全量 toLowerCase */
+    private searchIndex: Map<string, string> | null = null;
     onOpen: (id: string) => void;
     onDaily: (date: string) => void;
     onGenerateDaily: (date: string, force: boolean, scopes: string[]) => void;
@@ -1191,8 +1218,70 @@ class ArticleListView {
         this.onRefresh = onRefresh;
         this.onMarkRead = onMarkRead;
         this.renderDockBack = renderDockBack;
-        storage.on(() => this.render());
+        // 数据类事件走 rAF 合并的重渲染；read/star 走原地更新，避免整表重建
+        this.unsubscribers.push(storage.onTypes(["articles"], () => {
+            this.searchIndex = null;
+            this.requestRender();
+        }));
+        this.unsubscribers.push(storage.onTypes(["subs", "cats", "settings"], () => this.requestRender()));
+        this.unsubscribers.push(storage.onTypes(["read", "star"], () => this.onReadStarChange()));
         this.render();
+    }
+
+    destroy() {
+        if (this.renderFrame !== null) {
+            window.cancelAnimationFrame(this.renderFrame);
+            this.renderFrame = null;
+        }
+        if (this.searchTimer) {
+            clearTimeout(this.searchTimer);
+            this.searchTimer = null;
+        }
+        this.unsubscribers.forEach((fn) => fn());
+        this.unsubscribers = [];
+    }
+
+    /** 存储事件驱动的 rAF 合并渲染 */
+    private requestRender() {
+        if (this.renderFrame !== null) return;
+        this.renderFrame = window.requestAnimationFrame(() => {
+            this.renderFrame = null;
+            this.render();
+        });
+    }
+
+    /**
+     * 已读/星标变化：当前列表项集合不随 read 状态变化时，
+     * 只对可见 item 做 class toggle，不重建 DOM；按未读/星标过滤时退化为全量重渲染
+     */
+    private onReadStarChange() {
+        if (this.active === "daily") return;
+        if (this.active === "unread" || this.active === "starred" || this.filter !== "all") {
+            this.requestRender();
+            return;
+        }
+        this.updateItemStates();
+    }
+
+    private updateItemStates() {
+        const list = this.root.querySelector<HTMLElement>(".ar-list__items");
+        if (!list) return;
+        list.querySelectorAll<HTMLElement>(".ar-list__item").forEach((item) => {
+            const a = this.storage.getArticle(item.dataset.articleId || "");
+            if (!a) return;
+            const unread = !a.isRead;
+            item.classList.toggle("ar-list__item--unread", unread);
+            const dot = item.querySelector<HTMLElement>(".ar-list__dot");
+            if (dot) dot.classList.toggle("ar-list__dot--unread", unread);
+        });
+        const articles = this.getArticles();
+        const setCount = (cls: string, n: number) => {
+            const chip = this.root.querySelector<HTMLElement>(`.ar-list__chip--${cls}`);
+            const counter = chip?.querySelector<HTMLElement>(".ar-list__chip-c");
+            if (counter) counter.textContent = String(n);
+        };
+        setCount("unread", articles.filter((a) => !a.isRead).length);
+        setCount("starred", articles.filter((a) => a.isStarred).length);
     }
 
     setRefreshStatus(status: ArticleListView["refreshStatus"], text?: string) {
@@ -1243,9 +1332,25 @@ class ArticleListView {
         else if (this.filter === "starred") list = list.filter((a) => a.isStarred);
         if (this.search) {
             const s = this.search.toLowerCase();
-            list = list.filter((a) => a.title.toLowerCase().includes(s) || (a.description || "").toLowerCase().includes(s));
+            const index = this.ensureSearchIndex();
+            list = list.filter((a) => {
+                const hay = index.get(a.id);
+                return hay !== undefined && hay.includes(s);
+            });
         }
         return list;
+    }
+
+    /** 小写搜索索引：一次遍历建好，输入时只做 includes，避免每篇重复 toLowerCase */
+    private ensureSearchIndex(): Map<string, string> {
+        if (!this.searchIndex) {
+            const map = new Map<string, string>();
+            for (const a of this.storage.getArticles()) {
+                map.set(a.id, `${a.title || ""} ${a.description || ""}`.toLowerCase());
+            }
+            this.searchIndex = map;
+        }
+        return this.searchIndex;
     }
 
     getAdjacentArticle(id: string, direction: "prev" | "next"): Article | null {
@@ -1588,7 +1693,7 @@ class ArticleListView {
         const visible = articles.slice(0, this.visibleCount);
         let lastDay = "";
         visible.forEach((a) => {
-            const day = new Date(a.pubDate).toLocaleDateString("zh-CN");
+            const day = dayLabel(a.pubDate);
             if (day !== lastDay) {
                 list.appendChild(el("div", { class: "ar-list__day" }, [day]));
                 lastDay = day;
@@ -1694,6 +1799,11 @@ class Reader {
     private aiAbort: AbortController | null = null;
     private dailyAbort: AbortController | null = null;
     private translationStopBtn: HTMLElement | null = null;
+    private unsubscribers: (() => void)[] = [];
+    /** 同一原文只构建一次翻译分段（正文渲染与翻译执行共用），Map 字符串键按值命中 */
+    private translationBuildCache = new Map<string, { html: string; segments: { id: number; text: string }[] }>();
+    /** sanitize+postProcess 结果按原始 HTML 缓存，避免重复全量 DOM 解析 */
+    private processedHtmlCache = new Map<string, string>();
 
     constructor(root: HTMLElement, storage: Storage, ai: AIService, onOpenArticle: (id: string) => void, onNavigateArticle: (currentId: string, direction: "prev" | "next") => void, getAdjacentArticle: (currentId: string, direction: "prev" | "next") => Article | null, renderDockBack?: () => HTMLElement | null) {
         this.root = root;
@@ -1704,8 +1814,67 @@ class Reader {
         this.getAdjacentArticle = getAdjacentArticle;
         this.renderDockBack = renderDockBack;
         attachSelection(this.root, { ai, storage });
-        storage.on(() => this.handleStorageChange());
+        // 内容类事件走 signature 门控的重渲染；read/star 走状态按钮原地切换；
+        // 显示设置变化整栏重渲染
+        this.unsubscribers.push(storage.onTypes(["articles", "fulltext", "subs", "extras"], () => this.handleStorageChange()));
+        this.unsubscribers.push(storage.onTypes(["settings"], () => this.render()));
+        this.unsubscribers.push(storage.onTypes(["ai"], () => { if (this.mode === "article") this.render(); }));
+        this.unsubscribers.push(storage.onTypes(["read", "star"], () => this.updateStateButtons()));
         this.render();
+    }
+
+    destroy() {
+        this.aiAbort?.abort();
+        this.dailyAbort?.abort();
+        if (this.switchHintTimer) window.clearTimeout(this.switchHintTimer);
+        this.translationBuildCache.clear();
+        this.processedHtmlCache.clear();
+        this.unsubscribers.forEach((fn) => fn());
+        this.unsubscribers = [];
+    }
+
+    /** read/star 事件：只切状态按钮激活态，不重建阅读器 */
+    private updateStateButtons() {
+        if (this.mode !== "article" || !this.current) return;
+        const latest = this.storage.getArticle(this.current.id);
+        if (!latest) return;
+        this.current = latest;
+        const readBtn = this.root.querySelector<HTMLElement>(".ar-rd__state-btn--read");
+        if (readBtn) {
+            readBtn.classList.toggle("ar-btn--active", latest.isRead);
+            readBtn.title = latest.isRead ? "标为未读" : "标为已读";
+        }
+        const starBtn = this.root.querySelector<HTMLElement>(".ar-rd__state-btn--star");
+        if (starBtn) {
+            starBtn.classList.toggle("ar-btn--active", latest.isStarred);
+            starBtn.title = latest.isStarred ? "取消星标" : "星标";
+        }
+    }
+
+    private getTranslationBuild(sourceHtml: string) {
+        let entry = this.translationBuildCache.get(sourceHtml);
+        if (!entry) {
+            entry = buildTranslatableHtml(sourceHtml, 2);
+            this.translationBuildCache.set(sourceHtml, entry);
+            if (this.translationBuildCache.size > 8) {
+                const oldest = this.translationBuildCache.keys().next().value;
+                if (oldest !== undefined) this.translationBuildCache.delete(oldest);
+            }
+        }
+        return entry;
+    }
+
+    private getProcessedHtml(rawHtml: string): string {
+        let html = this.processedHtmlCache.get(rawHtml);
+        if (html === undefined) {
+            html = postProcess(sanitize(rawHtml));
+            this.processedHtmlCache.set(rawHtml, html);
+            if (this.processedHtmlCache.size > 16) {
+                const oldest = this.processedHtmlCache.keys().next().value;
+                if (oldest !== undefined) this.processedHtmlCache.delete(oldest);
+            }
+        }
+        return html;
     }
 
     private articleSignature(article: Article, sub?: Subscription) {
@@ -2106,6 +2275,8 @@ class Reader {
             batchSize: d.batchSize ?? DEFAULT_DAILY_REPORT.batchSize,
             concurrency: d.concurrency ?? DEFAULT_DAILY_REPORT.concurrency,
             showLinks: d.showLinks ?? DEFAULT_DAILY_REPORT.showLinks,
+            truncateContent: d.truncateContent !== false,
+            truncateChars: Math.max(0, Math.floor(d.truncateChars ?? DEFAULT_DAILY_REPORT.truncateChars)),
         };
     }
 
@@ -2278,7 +2449,7 @@ class Reader {
                     }));
                     let text = "";
                     try {
-                        text = await this.callDailyOnce(fakeArticle, dailyPrompt, buildDeepDivePrompt(date, deepBatch, bi), abort.signal);
+                        text = await this.callDailyOnce(fakeArticle, dailyPrompt, buildDeepDivePrompt(date, deepBatch, bi, { truncateChars: cfg.truncateContent ? cfg.truncateChars : 0 }), abort.signal);
                     } catch (e) {
                         if (abort.signal.aborted) throw e;
                         skipped.push(...batch.map((a) => a.id));
@@ -2356,7 +2527,7 @@ class Reader {
                 a.author ? el("span", { class: "ar-rd__sep" }, ["·"]) : null,
                 a.author ? el("span", {}, [a.author]) : null,
                 el("span", { class: "ar-rd__sep" }, ["·"]),
-                el("span", {}, [iconLabel("article", `${estimateReadingTime(a.content || a.description)} 分钟`, 12)]),
+                    el("span", {}, [iconLabel("article", `${estimateReadingTime(a.content || a.description, a)} 分钟`, 12)]),
                 a.savedDocId ? el("span", { class: "ar-rd__sep" }, ["·"]) : null,
                 a.savedDocId ? el("span", { class: "ar-rd__saved" }, [iconLabel("inbox", "已保存", 12)]) : null,
             ].filter(Boolean) as HTMLElement[]),
@@ -2372,8 +2543,7 @@ class Reader {
         if (this.translationVisible) {
             this.renderTranslationBody(c, a, displayHtml);
         } else {
-            const html = sanitize(displayHtml);
-            const body = el("div", { class: "ar-rd__body", html: postProcess(html) });
+            const body = el("div", { class: "ar-rd__body", html: this.getProcessedHtml(displayHtml) });
             c.appendChild(body);
         }
         if (isFullText) {
@@ -2398,10 +2568,10 @@ class Reader {
     renderTranslationBody(c: HTMLElement, a: Article, sourceHtml: string) {
         const translated = getTranslatedResult(a.aiResults?.[TRANSLATE_PROMPT.id]);
         if (translated.html) {
-            c.appendChild(el("div", { class: "ar-rd__body ar-rd__body--translated", html: postProcess(sanitize(translated.html)) }));
+            c.appendChild(el("div", { class: "ar-rd__body ar-rd__body--translated", html: this.getProcessedHtml(translated.html) }));
             return;
         }
-        const { html } = buildTranslatableHtml(sourceHtml, 2);
+        const { html } = this.getTranslationBuild(sourceHtml);
         const source = el("div", { class: "ar-rd__body ar-rd__translate-source", html });
         const stage = el("div", { class: "ar-rd__translate-stage" }, [
             el("div", { class: "ar-rd__translate-status" }, [spinner(12), " 正在翻译…"]),
@@ -2672,7 +2842,7 @@ class Reader {
             const processed = new Set<number>();
             const sourceHtml = a.fullText || a.content || a.description || "";
             const titleSegment = { id: 1, text: a.title || "(无标题)" };
-            const { segments: bodySegments } = buildTranslatableHtml(sourceHtml, 2);
+            const { segments: bodySegments } = this.getTranslationBuild(sourceHtml);
             const segments = [titleSegment, ...bodySegments];
             const batches = batchTranslationSegments(segments);
             const applyLine = (line: string) => {
@@ -2687,7 +2857,7 @@ class Reader {
                 if (!segment) return;
                 processed.add(id);
                 segment.dataset.translated = translated;
-                segment.querySelectorAll(".ar-rd__translate-char").forEach((char) => char.classList.add("ar-rd__translate-char--gone"));
+                segment.querySelectorAll<HTMLElement>(".ar-rd__translate-original").forEach((o) => o.classList.add("ar-rd__translate-char--gone"));
                 const replacement = el("span", { class: "ar-rd__translate-replacement" }, [translated]);
                 segment.appendChild(replacement);
                 setTimeout(() => {
@@ -2874,6 +3044,7 @@ export class RssTab {
     private autoRefreshTimer?: number;
     private refreshInterval?: number;
     private refreshDoneTimer?: number;
+    private faviconJobs: Set<Promise<void>> = new Set();
     private isDock = false;
     private dockView: "side" | "list" | "reader" = "side";
     private dockScroll: { side: number; list: number; reader: number } = { side: 0, list: 0, reader: 0 };
@@ -2977,9 +3148,17 @@ export class RssTab {
 
         this.storage.cleanupExpiredArticles();
 
-        // 自动刷新
-        const subs = storage.getSubs();
-        if (subs.length) this.autoRefreshTimer = window.setTimeout(() => this.refreshAll({ silent: true }), 1500);
+        // 自动刷新（增量补刷）：只补从未抓取或已超过自动刷新间隔的订阅，
+        // 避免重开 tab / 多开 tab 时全量重复请求所有 feed；手动刷新与周期刷新不受影响
+        const allSubs = storage.getSubs();
+        if (allSubs.length) {
+            const interval = storage.getSettings().general.autoRefresh;
+            const now = Date.now();
+            const due = allSubs.filter((s) => !s.lastFetchAt || (interval > 0 && s.lastFetchAt < now - interval * 60_000));
+            if (due.length) {
+                this.autoRefreshTimer = window.setTimeout(() => this.doRefresh(due, { toast: false }), 1500);
+            }
+        }
 
         // 定期刷新
         const interval = storage.getSettings().general.autoRefresh;
@@ -3001,6 +3180,10 @@ export class RssTab {
         this.autoRefreshTimer = undefined;
         this.refreshInterval = undefined;
         this.refreshDoneTimer = undefined;
+        this.faviconJobs.clear();
+        this.sidebar?.destroy();
+        this.list?.destroy();
+        this.reader?.destroy();
     }
 
     private saveDockScroll(view: "side" | "list" | "reader") {
@@ -3072,6 +3255,32 @@ export class RssTab {
         await this.doRefresh(subs, { toast: !options.silent });
     }
 
+    /**
+     * 后台解析 favicon（图片 Range 探活 / 站点首页抓取），不阻塞刷新管线。
+     * fire-and-forget：结果出来后单独 patchSubsMeta 回写，若期间订阅被删/加了自定义图标则丢弃。
+     */
+    private resolveFaviconInBackground(subId: string, f: ParsedFeed) {
+        const job = (async () => {
+            const latest = this.storage.getSub(subId);
+            if (!latest || latest.customFavicon) return;
+            const info = await resolveSubscriptionFavicon({
+                feedFavicon: f.favicon,
+                existingFavicon: latest.favicon,
+                existingTriedAt: latest.faviconTriedAt,
+                siteUrl: f.siteUrl || latest.siteUrl || latest.url,
+            });
+            // 解析期间订阅可能被删除或用户已设置自定义图标 → 丢弃结果
+            const after = this.storage.getSub(subId);
+            if (!after || after.customFavicon) return;
+            const patch: Partial<Subscription> = {};
+            if (info.favicon || !after.favicon) patch.favicon = info.favicon || fallbackFavicon(f.siteUrl || after.url);
+            if (info.attempted) patch.faviconTriedAt = info.triedAt;
+            if (Object.keys(patch).length) await this.storage.patchSubsMeta([{ id: subId, patch }]);
+        })().catch((e) => console.warn("[ai-rss] favicon resolve", e));
+        this.faviconJobs.add(job);
+        void job.finally(() => this.faviconJobs.delete(job));
+    }
+
     private async doRefresh(subs: Subscription[], options: { toast?: boolean } = {}) {
         if (this.refreshDoneTimer) window.clearTimeout(this.refreshDoneTimer);
         this.list?.setRefreshStatus("refreshing");
@@ -3104,21 +3313,10 @@ export class RssTab {
                         lastError: undefined,
                         errorCount: 0,
                     };
-                    if (!sub.customFavicon) {
-                        const faviconInfo = await resolveSubscriptionFavicon({
-                            feedFavicon: f.favicon,
-                            existingFavicon: sub.favicon,
-                            existingTriedAt: sub.faviconTriedAt,
-                            siteUrl: f.siteUrl || sub.siteUrl || sub.url,
-                        });
-                        if (faviconInfo.favicon || !sub.favicon) {
-                            faviconPatch.favicon = faviconInfo.favicon || fallbackFavicon(f.siteUrl || sub.url);
-                        }
-                        if (faviconInfo.attempted) {
-                            faviconPatch.faviconTriedAt = faviconInfo.triedAt;
-                        }
-                    }
                     metaPatches.push({ id: sub.id, patch: faviconPatch });
+                    // favicon 解析（图片探活/站点首页抓取，最坏可各耗 ~20s）改为后台 fire-and-forget，
+                    // 不阻塞刷新进度；结果出来后单独 patchSubsMeta 回写
+                    if (!sub.customFavicon) this.resolveFaviconInBackground(sub.id, f);
                 } catch (e) {
                     const latest = this.storage.getSub(sub.id);
                     if (latest) {

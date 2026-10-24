@@ -224,6 +224,8 @@ export default class AIRSSPlugin extends Plugin {
 
     onunload() {
         console.info("[ai-rss] unloading");
+        // 尽力立即落盘待合并的 articles/extras/fulltexts 写入
+        try { this.storage?.flushSaves(); } catch { /* */ }
         delete (window as any)[GLOBAL_KEY];
     }
 
