@@ -59,6 +59,10 @@ export interface AIResult {
     model: string; providerId: ID;
     usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
     generatedAt: number; durationMs: number; streamed?: boolean;
+    /** 翻译结果专用：段号 → 译文 映射（保存时"逐段对照"用） */
+    translatedSegments?: Record<string, string>;
+    translatedTitle?: string;
+    translatedComplete?: boolean;
 }
 
 /** AI 日报缓存（按日期） */

@@ -8,7 +8,8 @@ import { modal, button, toast } from "./components";
 import { siyuanIconEl } from "./icons";
 import { fetchSyncPost } from "siyuan";
 import type { PathMemory } from "./saveTargetStore";
-import { cleanMarkdownLinks, stripPluginFrontmatter } from "./markdownClean";
+import { cleanMarkdownLinks, stripPluginFrontmatter, resolveTemplateAiVars } from "./markdownClean";
+import { buildInlineTranslatedHtml } from "./contentTransform";
 
 interface Notebook { id: string; name: string; icon?: string; closed?: boolean; }
 
@@ -641,6 +642,22 @@ export async function saveMarkdownToSiyuan(title: string, markdown: string, fold
     });
 }
 
+/** 内置提示词 id（模板 AI 变量绑定） */
+const AI_SUMMARY_PID = "quick_summary_paragraph";
+const AI_TRANSLATE_PID = "quick_translate";
+
+/** AI 结果内容 → Markdown（HTML 结果先转 md） */
+function aiResultToMd(r?: AIResult): string {
+    let content = (r?.content || "").trim();
+    if (!content) return "";
+    if (/<[a-zA-Z][^>]*>/i.test(content)) {
+        const div = document.createElement("div");
+        div.innerHTML = content;
+        content = htmlToMd(div).trim();
+    }
+    return content;
+}
+
 function composeMd(article: Article, settings: Settings, _notebook: string, opts: { includeLink?: boolean; cleanLinks?: boolean; aiInclude?: Record<string, boolean> } = {}, aiResults: Record<string, AIResult> = {}): string {
     const cleaned = preprocessArticleHtml(article.content || "", article.link);
     const tmp = document.createElement("div");
@@ -650,6 +667,25 @@ function composeMd(article: Article, settings: Settings, _notebook: string, opts
     const includeLink = opts.includeLink ?? settings.save.includeSourceLink !== false;
     const cleanLinks = opts.cleanLinks ?? settings.save.cleanLinks !== false;
     const aiInclude = opts.aiInclude || {};
+    const aiOn = (pid: string) => aiInclude[pid] !== false;
+    const summaryRes = aiResults[AI_SUMMARY_PID];
+    const transRes = aiResults[AI_TRANSLATE_PID];
+    // 逐段对照：重建"原文 + 斜体译文"；无段映射（旧数据）时降级为 原文 + 完整译文
+    let contentTranslated = "";
+    if (aiOn(AI_TRANSLATE_PID) && transRes?.content) {
+        const sourceHtml = article.fullText || article.content || article.description || "";
+        const segs = transRes.translatedSegments;
+        if (segs && Object.keys(segs).length && sourceHtml) {
+            const built = buildInlineTranslatedHtml(sourceHtml, segs);
+            // covered=0 表示段号不匹配（如翻译后又抓取了全文），回退为 原文+完整译文
+            if (built.covered > 0) {
+                const div = document.createElement("div");
+                div.innerHTML = built.html;
+                contentTranslated = htmlToMd(div).trim();
+            }
+        }
+        if (!contentTranslated) contentTranslated = md + "\n\n" + aiResultToMd(transRes);
+    }
     const vars: Record<string, string> = {
         title: article.title || "(无标题)",
         author: article.author || "未知",
@@ -659,6 +695,10 @@ function composeMd(article: Article, settings: Settings, _notebook: string, opts
         content: md,
         summary: "",
         description: article.description || "",
+        title_translated: transRes?.translatedTitle || article.title || "",
+        ai_summary: aiOn(AI_SUMMARY_PID) ? aiResultToMd(summaryRes) : "",
+        ai_translation: aiOn(AI_TRANSLATE_PID) ? aiResultToMd(transRes) : "",
+        content_translated: contentTranslated,
     };
     let out = settings.save.template;
     for (const k of Object.keys(vars)) {
@@ -671,18 +711,15 @@ function composeMd(article: Article, settings: Settings, _notebook: string, opts
             return !u || u === article.link ? "" : m;
         });
     }
-    // 勾选的 AI 结果追加为独立小节（HTML 结果先转 Markdown）
-    for (const [pid, on] of Object.entries(aiResults)) {
-        if (!on) continue;
-        const r = aiResults[pid];
-        let content = (r?.content || "").trim();
-        if (!content) continue;
-        if (/<[a-zA-Z][^>]*>/i.test(content)) {
-            const div = document.createElement("div");
-            div.innerHTML = content;
-            content = htmlToMd(div).trim();
-        }
-        if (content) out += `\n\n## AI ${r?.promptName || pid}\n\n${content}`;
+    // 勾选的 AI 结果追加为独立小节（HTML 结果先转 Markdown）；
+    // 模板已用 AI 变量的内置类型不再重复追加；未勾选的跳过
+    const { usedSummary, usedTranslation } = resolveTemplateAiVars(settings.save.template || "");
+    for (const pid of Object.keys(aiResults)) {
+        if (pid === AI_SUMMARY_PID && usedSummary) continue;
+        if (pid === AI_TRANSLATE_PID && usedTranslation) continue;
+        if (aiInclude[pid] === false) continue;
+        const content = aiResultToMd(aiResults[pid]);
+        if (content) out += `\n\n## AI ${aiResults[pid]?.promptName || pid}\n\n${content}`;
     }
     if (cleanLinks) {
         out = cleanMarkdownLinks(out, includeLink ? { keepUrl: article.link } : undefined);

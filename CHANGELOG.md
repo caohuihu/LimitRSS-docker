@@ -1,5 +1,38 @@
 # CHANGELOG.md
 
+## [v0.2.8] 2026-10-25
+
+### 中文说明
+
+#### 新功能（Added）
+
+- **保存模板新增 AI 变量，输出格式完全自定义**（设置 → 保存到思源 → Markdown 模板）：
+  - `{{ai_summary}}`：AI 总结内容（适合放文章前面）
+  - `{{ai_translation}}`：完整译文（适合放文末）
+  - `{{content_translated}}`：原文每段后紧跟斜体译文（逐段对照）
+  - `{{title_translated}}`：翻译后标题（未翻译时回退原标题）
+  - 变量只输出内容、不带标题，标题由模板自行书写；未生成/未勾选时渲染为空并自动清理空行
+- **设置"保存到思源"一键预设**："总结在前·译文在尾"、"总结在前·逐段对照"、"恢复默认"
+- **翻译结果持久化段级映射**（`translatedSegments` 段号→译文），保存时可重建逐段对照；旧数据无映射时 `{{content_translated}}` 自动降级为"原文 + 完整译文"
+
+#### 修复（Fixed）
+
+- **保存对话框"AI 结果"勾选此前未生效**：模板自动追加小节时忽略了勾选状态，现在未勾选的 AI 结果不会出现在文档中
+- **去重**：模板已使用 `{{ai_summary}}`/`{{ai_translation}}`/`{{content_translated}}` 时，对应内置结果不再自动追加文末"## AI xxx"小节（自定义提示词结果仍照旧追加）
+
+### English
+
+#### Added
+
+- **New AI template variables for "Save to SiYuan"** (Settings → Markdown template): `{{ai_summary}}`, `{{ai_translation}}` (end-of-doc translation), `{{content_translated}}` (per-paragraph original + italic translation), `{{title_translated}}` (falls back to original). Variables render content only (headings are up to your template); empty when not generated/checked.
+- **One-click presets** in the save section: summary-first/translation-last and summary-first/inline-per-paragraph, plus restore-default.
+- **Per-segment translation persistence** (`translatedSegments`); legacy data without it degrades `{{content_translated}}` to original + full translation.
+
+#### Fixed
+
+- **Save-dialog "AI results" checkboxes were ignored** when auto-appending sections — unchecked results are now excluded.
+- **No duplicate sections**: built-in results covered by template variables are not auto-appended at the end; custom-prompt results still are.
+
 ## [v0.2.7] 2026-10-25
 
 ### 中文说明

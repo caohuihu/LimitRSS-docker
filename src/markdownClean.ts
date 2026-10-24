@@ -25,6 +25,14 @@ export function stripMarkdownLinks(markdown: string): string {
     return cleanMarkdownLinks(markdown).replace(/[↗︎↗]/g, "");
 }
 
+/** 模板是否已使用 AI 变量（纯函数，便于测试） */
+export function resolveTemplateAiVars(template: string): { usedSummary: boolean; usedTranslation: boolean } {
+    return {
+        usedSummary: template.includes("{{ai_summary}}"),
+        usedTranslation: template.includes("{{ai_translation}}") || template.includes("{{content_translated}}"),
+    };
+}
+
 /** 去除开头的插件 YAML frontmatter（含 custom-ai-rss- 键） */
 export function stripPluginFrontmatter(markdown: string): string {
     const src = markdown || "";

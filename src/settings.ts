@@ -8,7 +8,7 @@ import { icon as makeIcon, renderFavicon } from "./icons";
 import { fetchSyncPost } from "siyuan";
 import { Storage } from "./storage";
 import { AIService } from "./ai";
-import { AIProvider, DEFAULT_PROMPTS, PromptTemplate, Subscription } from "./types";
+import { AIProvider, DEFAULT_PROMPTS, DEFAULT_SETTINGS, PromptTemplate, Subscription } from "./types";
 import { DEFAULT_DAILY_REPORT, type DailyReportMode, type DailyReportSettings } from "./dailyReportCore";
 import { applyDisplaySettings } from "./theme";
 import { fetchAndParse, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
@@ -530,7 +530,24 @@ function renderSave(main: HTMLElement, s: Storage) {
     const ta = el("textarea", { class: "ar-input", rows: 8, style: { fontFamily: "var(--b3-font-family-code)", fontSize: "12px" } }, [settings.save.template]) as HTMLTextAreaElement;
     ta.addEventListener("change", debounce(() => s.updateSettings({ save: { ...settings.save, template: ta.value } }), 400));
     wrap.appendChild(formRow("Markdown 模板", ta));
-    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["可用变量：{{title}} {{author}} {{date}} {{link}} {{source}} {{content}} {{summary}} {{description}}"]));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["可用变量：{{title}} {{title_translated}} {{author}} {{date}} {{link}} {{source}} {{content}} {{content_translated}} {{ai_summary}} {{ai_translation}} {{summary}} {{description}}"]));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["AI 变量说明：{{ai_summary}}=AI 总结、{{ai_translation}}=完整译文（放文末）、{{content_translated}}=原文每段后紧跟斜体译文、{{title_translated}}=翻译后标题（未翻译回退原标题）。未生成/未勾选时渲染为空；模板使用了 AI 变量后，对应结果不再自动追加到文末。"]));
+    // 一键预设：满足"总结在前"偏好
+    const presetTop = `# {{title_translated}}\n\n> {{source}} · {{date}} · [原文]({{link}})\n\n## AI 总结\n{{ai_summary}}\n\n## 原文\n{{content}}\n\n## AI 翻译\n{{ai_translation}}`;
+    const presetInline = `# {{title_translated}}\n\n> {{source}} · {{date}} · [原文]({{link}})\n\n## AI 总结\n{{ai_summary}}\n\n## 原文（逐段对照）\n{{content_translated}}`;
+    const applyTemplate = (tpl: string, label: string) => {
+        ta.value = tpl;
+        s.updateSettings({ save: { ...s.getSettings().save, template: tpl } });
+        toast(`已应用模板预设：${label}`, "success", 2500);
+    };
+    wrap.appendChild(el("div", { class: "ar-form__row" }, [
+        el("label", { class: "ar-form__label" }, ["模板预设"]),
+        el("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, [
+            button({ variant: "ghost", size: "xs", text: "总结在前·译文在尾", onclick: () => applyTemplate(presetTop, "总结在前·译文在尾") }),
+            button({ variant: "ghost", size: "xs", text: "总结在前·逐段对照", onclick: () => applyTemplate(presetInline, "总结在前·逐段对照") }),
+            button({ variant: "ghost", size: "xs", text: "恢复默认", onclick: () => applyTemplate(DEFAULT_SETTINGS.save.template, "默认") }),
+        ]),
+    ]));
     wrap.appendChild(formRow("包含原文链接", checkbox(settings.save.includeSourceLink, (v) => s.updateSettings({ save: { ...settings.save, includeSourceLink: v } }))));
     wrap.appendChild(formRow("链接清理", checkbox(settings.save.cleanLinks !== false, (v) => s.updateSettings({ save: { ...s.getSettings().save, cleanLinks: v } }))));
     wrap.appendChild(el("div", { class: "ar-form__hint" }, ["开启后导出正文将清理除原文链接外的网址链接（默认开启）。"]));

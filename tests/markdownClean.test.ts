@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { cleanMarkdownLinks, stripMarkdownLinks, stripPluginFrontmatter } from "../src/markdownClean.ts";
+import { cleanMarkdownLinks, stripMarkdownLinks, stripPluginFrontmatter, resolveTemplateAiVars } from "../src/markdownClean.ts";
 
 const saveSource = readFileSync(fileURLToPath(new URL("../src/save.ts", import.meta.url)), "utf8");
 
@@ -53,4 +53,12 @@ test("stripPluginFrontmatter 保留非插件 frontmatter", () => {
 test("htmlToMd 链接输出为标准 Markdown 链接（源码回归）", () => {
     assert.ok(saveSource.includes("[${label}](${href})"));
     assert.ok(!saveSource.includes("inlineToStr(n)}(${href})]"));
+});
+
+test("resolveTemplateAiVars 识别模板中的 AI 变量", () => {
+    assert.deepEqual(resolveTemplateAiVars("# {{title}}\n{{content}}"), { usedSummary: false, usedTranslation: false });
+    assert.deepEqual(resolveTemplateAiVars("{{ai_summary}}"), { usedSummary: true, usedTranslation: false });
+    assert.deepEqual(resolveTemplateAiVars("{{ai_translation}}"), { usedSummary: false, usedTranslation: true });
+    assert.deepEqual(resolveTemplateAiVars("{{content_translated}}"), { usedSummary: false, usedTranslation: true });
+    assert.deepEqual(resolveTemplateAiVars("{{ai_summary}}\n{{ai_translation}}"), { usedSummary: true, usedTranslation: true });
 });

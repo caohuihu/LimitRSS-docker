@@ -20,62 +20,10 @@ import { attachSelection } from "./selection";
 import { applyCategoryToggle, applySubToggle, categoryCheckState, scopePanelNeedsRebuild, scopeSummaryLabel, selectAll, selectNone, toggleCategoryExpanded } from "./dailyScopeCore";
 import { createPathsMemory, PathMemory } from "./saveTargetStore";
 import { stripMarkdownLinks } from "./markdownClean";
-import DOMPurify from "dompurify";
+import { sanitize, postProcess, buildTranslatableHtml, buildTranslatableTitleHtml } from "./contentTransform";
 import { genId, dateKey, secureResourceUrl } from "./util";
 
 // =============== 工具 ===============
-
-const SANITIZE_CONFIG = {
-    ALLOWED_TAGS: ["a", "b", "blockquote", "br", "code", "div", "em", "figure", "figcaption", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "span", "strong", "sub", "sup", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"],
-    ALLOWED_ATTR: ["href", "title", "alt", "src", "class", "target", "rel"],
-};
-
-function sanitize(html: string): string {
-    if (!html) return "";
-    return DOMPurify.sanitize(html, SANITIZE_CONFIG) as string;
-}
-
-/** 显示端去重：完全相同的文本段落只保留第一处（处理部分源图文重复） */
-function dedupeBodyBlocks(root: HTMLElement) {
-    const seen = new Set<string>();
-    root.querySelectorAll("p, h1, h2, h3, h4, h5, h6, blockquote, li").forEach((n) => {
-        const t = (n.textContent || "").trim().replace(/\s+/g, " ");
-        if (t.length < 12) return;
-        if (seen.has(t)) {
-            n.remove();
-            return;
-        }
-        seen.add(t);
-    });
-}
-
-function postProcess(html: string): string {
-    const div = document.createElement("div");
-    div.innerHTML = html;
-    dedupeBodyBlocks(div);
-    div.querySelectorAll("a").forEach((a) => { a.setAttribute("target", "_blank"); a.setAttribute("rel", "noopener noreferrer"); });
-    const seenImg = new Set<string>();
-    div.querySelectorAll("img").forEach((i) => {
-        const rawSrc = i.getAttribute("src") || "";
-        // https 应用（浏览器/Docker 模式）下升级 http:// 图片，避免混合内容被拦截
-        const src = secureResourceUrl(rawSrc);
-        if (rawSrc !== src) i.setAttribute("src", src);
-        if (src && seenImg.has(src)) {
-            i.remove(); // 相同图片只保留第一张，避免图文重复
-            return;
-        }
-        if (src) seenImg.add(src);
-        i.setAttribute("loading", "lazy");
-    });
-    Array.from(div.querySelectorAll("table")).forEach((table) => {
-        if (table.parentElement?.classList.contains("ar-rd__table-scroll")) return;
-        const wrapper = document.createElement("div");
-        wrapper.className = "ar-rd__table-scroll";
-        table.parentNode?.insertBefore(wrapper, table);
-        wrapper.appendChild(table);
-    });
-    return div.innerHTML;
-}
 
 function articleId(subId: string, link: string): string {
     let h = 0x811c9dc5;
@@ -186,10 +134,6 @@ function usableFullText(article: Article): string | null {
     return article.fullText;
 }
 
-function escapeAttr(s: string): string {
-    return escapeHtml(s).replace(/"/g, "&quot;");
-}
-
 function fallbackFavicon(url: string): string {
     try {
         const u = new URL(url);
@@ -202,49 +146,6 @@ function fallbackFavicon(url: string): string {
 function subscriptionLogo(sub: Subscription, className: string, fallbackSize = 13): HTMLElement {
     const logoUrl = sub.customFavicon || sub.favicon || fallbackFavicon(sub.siteUrl || sub.url);
     return renderFavicon(logoUrl, className, fallbackSize);
-}
-
-function buildTranslatableHtml(sourceHtml: string, startId = 1): { html: string; segments: { id: number; text: string }[] } {
-    const root = document.createElement("div");
-    root.innerHTML = postProcess(sanitize(sourceHtml));
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-            const text = node.nodeValue || "";
-            const parent = node.parentElement;
-            if (!text.trim()) return NodeFilter.FILTER_REJECT;
-            if (parent?.closest("code, pre")) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_ACCEPT;
-        },
-    });
-    const nodes: Text[] = [];
-    while (walker.nextNode()) nodes.push(walker.currentNode as Text);
-
-    const segments: { id: number; text: string }[] = [];
-    let total = 0;
-    nodes.forEach((node) => {
-        const text = node.nodeValue || "";
-        if (total > 14000) return;
-        total += text.length;
-        const id = startId + segments.length;
-        segments.push({ id, text });
-        const wrap = document.createElement("span");
-        wrap.className = "ar-rd__translate-segment";
-        wrap.dataset.segId = String(id);
-        wrap.dataset.original = text;
-        // 整段一个文本节点：原文淡出用 CSS 过渡整段完成，避免逐字符建 DOM
-        const original = document.createElement("span");
-        original.className = "ar-rd__translate-original";
-        original.textContent = text;
-        wrap.appendChild(original);
-        node.parentNode?.replaceChild(wrap, node);
-    });
-
-    return { html: root.innerHTML, segments };
-}
-
-function buildTranslatableTitleHtml(title: string): string {
-    const text = title || "(无标题)";
-    return `<span class="ar-rd__translate-segment" data-seg-id="1" data-original="${escapeAttr(text)}"><span class="ar-rd__translate-original">${escapeHtml(text)}</span></span>`;
 }
 
 function translatedHtmlFromSource(source: HTMLElement): string {
@@ -263,9 +164,8 @@ function translatedTextFromSegment(root: ParentNode, id: number): string {
 
 function getTranslatedResult(result?: AIResult): { title?: string; html?: string } {
     if (!result) return {};
-    const extra = result as AIResult & { translatedTitle?: string; translatedComplete?: boolean };
-    if (!extra.translatedComplete) return {};
-    return { title: extra.translatedTitle, html: result.content };
+    if (!result.translatedComplete) return {};
+    return { title: result.translatedTitle, html: result.content };
 }
 
 function parseJsonArray(text: string): any[] {
@@ -2981,7 +2881,14 @@ class Reader {
             }
             if (finalHtml && finalResult) {
                 a.aiResults = a.aiResults || {};
-                const savedResult = { ...finalResult, content: finalHtml, translatedTitle: finalTitle, translatedComplete: true, durationMs: Date.now() - startedAt };
+                // 收集 段号→译文 映射，供保存时"逐段对照"重建
+                const segMap: Record<string, string> = {};
+                this.root.querySelectorAll<HTMLElement>(".ar-rd__translate-segment").forEach((seg) => {
+                    const id = seg.dataset.segId;
+                    const t = seg.dataset.translated;
+                    if (id && t) segMap[id] = t;
+                });
+                const savedResult = { ...finalResult, content: finalHtml, translatedTitle: finalTitle, translatedComplete: true, translatedSegments: Object.keys(segMap).length ? segMap : undefined, durationMs: Date.now() - startedAt };
                 a.aiResults[prompt.id] = savedResult;
                 await this.storage.setAIResult(a.id, prompt.id, savedResult);
                 setTimeout(() => this.render(), 420);
