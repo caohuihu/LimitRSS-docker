@@ -3,6 +3,7 @@ name: Build Plugin
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -13,10 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Resolve version
+        id: version
+        run: echo "version=$(node -p "require('./plugin.json').version")" >> "$GITHUB_OUTPUT"
 
       - run: npm ci
 
@@ -28,11 +35,27 @@ jobs:
           name: LimitRSS-plugin
           path: package.zip
 
+      - name: Resolve release notes
+        shell: bash
+        run: |
+          NOTES="RELEASE_NOTES_v${{ steps.version.outputs.version }}.md"
+          if [ -f "$NOTES" ]; then
+            cp "$NOTES" .release-notes-body.md
+          else
+            # 无对应说明文件时，回退取 CHANGELOG 中该版本段落（中英双语）
+            awk -v ver="v${{ steps.version.outputs.version }}" '
+              $0 ~ "^## \\[" ver "\\]" {f=1; next}
+              f && /^## \[/ {exit}
+              f {print}
+            ' CHANGELOG.md > .release-notes-body.md
+          fi
+          echo "notes file ready: $(wc -l < .release-notes-body.md) lines"
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ github.run_number }}
-          name: LimitRSS v${{ github.run_number }}
-          files: package.zip
+          tag_name: ${{ github.ref_name }}
+          name: "LimitRSS v${{ steps.version.outputs.version }}"
+          file_from: .release-notes-body.md
           draft: false
           prerelease: false
