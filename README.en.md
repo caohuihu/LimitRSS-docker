@@ -27,6 +27,7 @@
 - 📥 **One-Click Save** — Convert article to SiYuan document with template
 - 🏷 **Auto Tagging** — Write source, URL, and custom tags as block attributes
 - 🖼 **Image Localization** — Download remote images to local assets
+- 🧠 **Optional AI Results** — Toggle which AI summary / translation sections to append to the saved document
 - 📋 **Multiple Notebooks** — Choose where to save each article
 - 📑 **Template System** — Customize output format with variables
 

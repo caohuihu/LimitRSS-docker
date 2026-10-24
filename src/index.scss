@@ -1069,7 +1069,7 @@
     background: var(--ar-bg); border-bottom: 1px solid var(--ar-border);
     font-size: 13px; font-weight: 600;
 }
-.ar-rd__ai-card-body { padding: 14px; line-height: 1.7; font-size: 14px;
+.ar-rd__ai-card-body { padding: 14px; line-height: 1.7; font-size: var(--ar-reader-font-size, 15px);
     h1, h2, h3 { font-weight: 700; margin: 12px 0 8px; }
     h2 { font-size: 1.15em; padding-bottom: 4px; border-bottom: 1px solid var(--ar-border); }
     p { margin: 0 0 10px; }
@@ -1077,6 +1077,13 @@
     pre { background: var(--ar-bg); padding: 10px; border-radius: var(--ar-radius); overflow-x: auto; }
     code { background: var(--ar-bg); padding: 1px 5px; border-radius: 3px; font-family: var(--b3-font-family-code); }
     pre code { background: transparent; }
+}
+.ar-rd__ai-card--collapsed .ar-rd__ai-card-body { display: none; }
+.ar-rd__ai-card-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; padding: 0; border: 0; background: transparent;
+    color: var(--ar-text-secondary); cursor: pointer; border-radius: var(--ar-radius-sm);
+    &:hover { background: var(--ar-bg-secondary); color: var(--ar-text); }
 }
 .ar-rd__ai-card-foot { display: flex; gap: 4px; padding: 8px 14px; border-top: 1px solid var(--ar-border); background: var(--ar-bg); justify-content: flex-end; }
 .ar-rd__ai-meta { font-size: 11px; color: var(--ar-text-tertiary); font-weight: 400; }
@@ -1697,6 +1704,7 @@ select.ar-input {
 .ar-nb-icon svg { width: 16px; height: 16px; }
 .ar-nb-item__name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ar-save-path-hint { margin-top: 2px; word-break: break-all; }
+.ar-save-ai-checks { display: flex; flex-direction: column; gap: 4px; }
 
 /* 下拉菜单当前项 */
 .ar-drop__item--active { color: var(--ar-accent); }

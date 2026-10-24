@@ -376,7 +376,7 @@ function createTargetPickerLegacy(notebooks: Notebook[], initialNotebook: string
     };
 }
 
-export async function saveToSiyuan(article: Article, settings: Settings, aiResults: Record<string, AIResult> = {}, sub?: Subscription, paths?: PathMemory, onCleanLinksChange?: (v: boolean) => void) {
+export async function saveToSiyuan(article: Article, settings: Settings, aiResults: Record<string, AIResult> = {}, sub?: Subscription, paths?: PathMemory, onCleanLinksChange?: (v: boolean) => void, preset?: { includeAI?: Record<string, boolean> }) {
     // 兜底：从全局存储取最新 AI 结果，避免闭包引用/对象替换导致总结丢失
     try {
         const g = (window as any).__ai_rss__;
@@ -421,8 +421,19 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
     const tagInput = el("input", { class: "ar-input", type: "text", value: tags, placeholder: "用逗号分隔" });
     const previewEl = el("pre", { class: "ar-preview" });
 
+    // 是否将各 AI 结果（总结/翻译…）附进文档：逐条勾选。
+    // 有 preset.includeAI 时只勾选指定的；否则默认全部勾选
+    const aiChecks: { pid: string; label: string; input: HTMLInputElement }[] = [];
+    for (const [pid, r] of Object.entries(aiResults)) {
+        if (!r?.content) continue;
+        const cb = el("input", { type: "checkbox" }) as HTMLInputElement;
+        cb.checked = preset?.includeAI ? !!preset.includeAI[pid] : true;
+        aiChecks.push({ pid, label: r.promptName || pid, input: cb });
+    }
+    const aiInclude = () => Object.fromEntries(aiChecks.map((c) => [c.pid, c.input.checked]));
+
     const updatePreview = () => {
-        const md = composeMd(article, settings, picker.getNotebook(), { includeLink, cleanLinks });
+        const md = composeMd(article, settings, picker.getNotebook(), { includeLink, cleanLinks, aiInclude: aiInclude() }, aiResults);
         previewEl.textContent = md.slice(0, 1500) + (md.length > 1500 ? "\n…" : "");
         const nbName = notebooks.find((n) => n.id === picker.getNotebook())?.name || "";
         picker.resolvePath(safeName((nameInput as HTMLInputElement).value || article.title))
@@ -434,13 +445,22 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
     linkCheck.addEventListener("change", () => { includeLink = linkCheck.checked; updatePreview(); });
     imgCheck.addEventListener("change", () => { downloadImages = imgCheck.checked; updatePreview(); });
     cleanCheck.addEventListener("change", () => { cleanLinks = cleanCheck.checked; onCleanLinksChange?.(cleanLinks); updatePreview(); });
+    aiChecks.forEach((c) => c.input.addEventListener("change", updatePreview));
     [nameInput, linkCheck, imgCheck, cleanCheck, tagInput].forEach((e) => {
         e.addEventListener("change", updatePreview);
         e.addEventListener("input", updatePreview);
     });
+    const aiRow = aiChecks.length
+        ? el("div", { class: "ar-form__row" }, [
+            el("label", { class: "ar-form__label" }, ["AI 结果"]),
+            el("div", { class: "ar-save-ai-checks" }, aiChecks.map((c) =>
+                el("label", { class: "ar-check" }, [c.input, ` ${c.label}`]),
+            )),
+        ])
+        : null;
 
     const doSave = async () => {
-        const md = composeMd(article, settings, picker.getNotebook(), { includeLink, cleanLinks });
+        const md = composeMd(article, settings, picker.getNotebook(), { includeLink, cleanLinks, aiInclude: aiInclude() }, aiResults);
         const tags2 = (tagInput as HTMLInputElement).value.split(",").map((s) => s.trim()).filter(Boolean);
         const saveBtn = dialog.container.querySelector(".ar-save-btn") as HTMLButtonElement;
         saveBtn.disabled = true;
@@ -507,14 +527,15 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
                 tagInput,
                 el("div", { class: "ar-form__hint" }, ["作为 custom-ai-rss-tags 块属性写入"]),
             ]),
-            el("div", { class: "ar-form__row" }, [
-                el("label", { class: "ar-form__label" }, ["选项"]),
-                el("div", { class: "ar-form__opts" }, [
-                    el("label", { class: "ar-check" }, [linkCheck, " 包含原文链接"]),
-                    el("label", { class: "ar-check" }, [imgCheck, " 下载远程图片到本地"]),
-                    el("label", { class: "ar-check" }, [cleanCheck, " 链接清理（保留原文链接）"]),
+                el("div", { class: "ar-form__row" }, [
+                    el("label", { class: "ar-form__label" }, ["选项"]),
+                    el("div", { class: "ar-form__opts" }, [
+                        el("label", { class: "ar-check" }, [linkCheck, " 包含原文链接"]),
+                        el("label", { class: "ar-check" }, [imgCheck, " 下载远程图片到本地"]),
+                        el("label", { class: "ar-check" }, [cleanCheck, " 链接清理（保留原文链接）"]),
+                    ]),
                 ]),
-            ]),
+                aiRow,
             el("div", { class: "ar-form__row" }, [
                 el("label", { class: "ar-form__label" }, ["预览"]),
                 el("div", { class: "ar-preview-wrap" }, [previewEl]),
@@ -605,7 +626,7 @@ export async function saveMarkdownToSiyuan(title: string, markdown: string, fold
     });
 }
 
-function composeMd(article: Article, settings: Settings, _notebook: string, opts: { includeLink?: boolean; cleanLinks?: boolean } = {}): string {
+function composeMd(article: Article, settings: Settings, _notebook: string, opts: { includeLink?: boolean; cleanLinks?: boolean; aiInclude?: Record<string, boolean> } = {}, aiResults: Record<string, AIResult> = {}): string {
     const cleaned = preprocessArticleHtml(article.content || "", article.link);
     const tmp = document.createElement("div");
     tmp.innerHTML = cleaned;
@@ -613,6 +634,7 @@ function composeMd(article: Article, settings: Settings, _notebook: string, opts
 
     const includeLink = opts.includeLink ?? settings.save.includeSourceLink !== false;
     const cleanLinks = opts.cleanLinks ?? settings.save.cleanLinks !== false;
+    const aiInclude = opts.aiInclude || {};
     const vars: Record<string, string> = {
         title: article.title || "(无标题)",
         author: article.author || "未知",
@@ -633,6 +655,19 @@ function composeMd(article: Article, settings: Settings, _notebook: string, opts
             const u = url.trim();
             return !u || u === article.link ? "" : m;
         });
+    }
+    // 勾选的 AI 结果追加为独立小节（HTML 结果先转 Markdown）
+    for (const [pid, on] of Object.entries(aiResults)) {
+        if (!on) continue;
+        const r = aiResults[pid];
+        let content = (r?.content || "").trim();
+        if (!content) continue;
+        if (/<[a-zA-Z][^>]*>/i.test(content)) {
+            const div = document.createElement("div");
+            div.innerHTML = content;
+            content = htmlToMd(div).trim();
+        }
+        if (content) out += `\n\n## AI ${r?.promptName || pid}\n\n${content}`;
     }
     if (cleanLinks) {
         out = cleanMarkdownLinks(out, includeLink ? { keepUrl: article.link } : undefined);

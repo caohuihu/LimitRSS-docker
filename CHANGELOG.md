@@ -1,5 +1,31 @@
 # CHANGELOG.md
 
+## [v0.2.4] 2026-10-24
+
+### 中文说明
+
+#### 新增（Added）
+
+- **保存到思源支持"包含 AI 结果"勾选**：保存对话框新增"AI 结果"勾选区（按 总结/翻译 逐条勾选，默认全选；从单条结果的"保存到思源"进入时只预选该条），勾选内容以 `## AI <名称>` 小节追加到文档末尾，HTML 类结果（如翻译）自动转 Markdown，并受"链接清理"规则约束。
+- **AI 结果卡片增强**：新增 折叠/展开（长总结不再顶走正文）、一键复制文本（翻译结果先转纯文本）、"附加到思源"改为"保存到思源"并联动勾选。
+
+#### 修复（Fixed）
+
+- **AI 结果此前从未真正写入保存的文档**：`saveToSiyuan` 虽然合并了 `aiResults`，但 `composeMd` 完全没有使用它，"附加到思源"按钮实际保存的文档不含总结/翻译；本版起按勾选真正写入。
+- **AI 卡片字号写死 14px**：现跟随"设置 → 外观 → 字号"（`--ar-reader-font-size`）。
+
+### English
+
+#### Added
+
+- **Save-to-SiYuan now supports an "Include AI results" option**: the save dialog gains a per-result checkbox group (summary / translation, all on by default; entering from a single result's "Save" button pre-checks only that one). Selected results are appended to the saved document as `## AI <name>` sections; HTML results (e.g. translations) are converted to Markdown and follow the link-cleaning rules.
+- **AI result card enhancements**: collapse/expand (long summaries no longer push the article down), one-click copy (translation results are converted to plain text first), and "Attach to SiYuan" becomes "Save to SiYuan" wired to the checkbox.
+
+#### Fixed
+
+- **AI results were never actually written into saved documents**: `saveToSiyuan` merged `aiResults` but `composeMd` ignored them, so the "Attach to SiYuan" button saved documents without the summary/translation. Now the checked results are genuinely written in.
+- **AI card font was hardcoded to 14px**: it now follows Settings → Appearance → font size (`--ar-reader-font-size`).
+
 ## [v0.2.3] 2026-10-24
 
 ### 中文说明

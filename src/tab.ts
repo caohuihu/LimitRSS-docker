@@ -2726,22 +2726,46 @@ class Reader {
     }
 
     renderResultCard(a: Article, pid: string, r: AIResult) {
-        return el("div", { class: "ar-rd__ai-card", dataset: { promptId: pid } }, [
-            el("div", { class: "ar-rd__ai-card-head" }, [
-                el("span", {}, [r.promptName]),
-                el("span", { style: { flex: "1" } }),
-                r.usage ? el("span", { class: "ar-rd__ai-meta" }, [iconLabel("chart", `${r.usage.totalTokens} tokens`, 12)]) : null,
-                el("span", { class: "ar-rd__ai-meta" }, [iconLabel("clock", `${Math.round((r.durationMs || 0) / 100) / 10}s`, 12)]),
-            ]),
-            el("div", { class: "ar-rd__ai-card-body", html: mdToHtml(r.content) }),
-            el("div", { class: "ar-rd__ai-card-foot" }, [
-                button({ variant: "secondary", size: "xs", icon: "refresh", text: pid === TRANSLATE_PROMPT.id ? "重新翻译" : "重新生成", onclick: () => {
-                    if (pid === TRANSLATE_PROMPT.id) this.rerollTranslation(a);
-                    else this.rerollQuickPrompt(a, this.effectivePrompt(pid));
-                } }),
-                button({ variant: "primary", size: "xs", icon: "save", text: "附加到思源", onclick: () => saveToSiyuan(a, this.storage.getSettings(), { [pid]: r }, this.storage.getSub(a.subscriptionId), this.savePathMemory()).then((id) => { if (id) this.storage.setSaved(a.id, id); }) }),
-            ]),
-        ]);
+        const card = el("div", { class: "ar-rd__ai-card", dataset: { promptId: pid } });
+        const toggle = el("button", { class: "ar-rd__ai-card-toggle", type: "button", title: "折叠" }, [makeIcon("chevronDown", 12)]);
+        toggle.onclick = () => {
+            const collapsed = card.classList.toggle("ar-rd__ai-card--collapsed");
+            clear(toggle);
+            toggle.appendChild(makeIcon(collapsed ? "chevronRight" : "chevronDown", 12));
+            toggle.title = collapsed ? "展开" : "折叠";
+        };
+        card.appendChild(el("div", { class: "ar-rd__ai-card-head" }, [
+            el("span", {}, [r.promptName]),
+            el("span", { style: { flex: "1" } }),
+            r.usage ? el("span", { class: "ar-rd__ai-meta" }, [iconLabel("chart", `${r.usage.totalTokens} tokens`, 12)]) : null,
+            el("span", { class: "ar-rd__ai-meta" }, [iconLabel("clock", `${Math.round((r.durationMs || 0) / 100) / 10}s`, 12)]),
+            toggle,
+        ].filter(Boolean) as HTMLElement[]));
+        card.appendChild(el("div", { class: "ar-rd__ai-card-body", html: mdToHtml(r.content) }));
+        const copyText = () => {
+            let text = r.content || "";
+            if (/<[a-zA-Z][^>]*>/i.test(text)) {
+                const d = document.createElement("div");
+                d.innerHTML = text;
+                text = (d.textContent || "").trim();
+            }
+            navigator.clipboard?.writeText(text).then(
+                () => toast("已复制到剪贴板", "success"),
+                () => toast("复制失败", "error"),
+            );
+        };
+        card.appendChild(el("div", { class: "ar-rd__ai-card-foot" }, [
+            button({ variant: "secondary", size: "xs", icon: "refresh", text: pid === TRANSLATE_PROMPT.id ? "重新翻译" : "重新生成", onclick: () => {
+                if (pid === TRANSLATE_PROMPT.id) this.rerollTranslation(a);
+                else this.rerollQuickPrompt(a, this.effectivePrompt(pid));
+            } }),
+            button({ variant: "ghost", size: "xs", icon: "copy", text: "复制", title: "复制结果文本", onclick: copyText }),
+            button({ variant: "primary", size: "xs", icon: "save", text: "保存到思源", title: "保存文章（可勾选是否包含本条 AI 结果）", onclick: () => {
+                saveToSiyuan(a, this.storage.getSettings(), { [pid]: r }, this.storage.getSub(a.subscriptionId), this.savePathMemory(), undefined, { includeAI: { [pid]: true } })
+                    .then((id) => { if (id) this.storage.setSaved(a.id, id); });
+            } }),
+        ]));
+        return card;
     }
 
     async runPrompt(a: Article, promptId: string) {
