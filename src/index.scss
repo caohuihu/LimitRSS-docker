@@ -1925,3 +1925,15 @@ select.ar-input {
     .ar-save-nb-select { width: 100%; max-width: 100%; }
     .ar-side__footer { flex-direction: row; }
 }
+
+// =============== 快捷键帮助 ===============
+.ar-shortcut-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.ar-shortcut-row { display: flex; align-items: center; gap: 12px; }
+.ar-shortcut-key {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 92px; padding: 3px 8px;
+    border: 1px solid var(--ar-border); border-radius: var(--ar-radius-sm);
+    background: var(--ar-bg-secondary);
+    font-family: var(--b3-font-family-code); font-size: 12px; color: var(--ar-text-secondary);
+}
+.ar-shortcut-desc { flex: 1; font-size: 13px; }

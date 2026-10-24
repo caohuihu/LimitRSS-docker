@@ -734,6 +734,21 @@ export class Storage {
         await this.persist(KEYS.star, Array.from(this.star));
         this.emit("star");
     }
+    /** 批量星标，只落盘一次 star 数组 */
+    async markStar(ids: string[], v = true) {
+        const set = new Set(ids);
+        let changed = false;
+        for (const id of set) {
+            const a = this.articles.get(id);
+            if (!a || a.isStarred === v) continue;
+            a.isStarred = v;
+            if (v) this.star.add(id); else this.star.delete(id);
+            changed = true;
+        }
+        if (!changed) return;
+        this.persist(KEYS.star, Array.from(this.star));
+        this.emit("star");
+    }
     async setArticleFullText(id: string, fullText?: string | null) {
         const a = this.articles.get(id);
         if (!a) return;

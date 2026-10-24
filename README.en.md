@@ -8,17 +8,18 @@
 
 ### Core
 - 📡 **Full RSS/Atom Support** — Subscribe, organize, refresh, manage errors
+- 🔎 **Site Feed Auto-Discovery** — Paste a site URL (e.g. https://example.com) and its RSS/Atom feed is detected automatically
 - 🗂 **OPML Import/Export** — Migrate from other readers, backup easily
-- ⭐ **Star / Read / Unread** — Track important articles, automatic read state
+- ⭐ **Star / Read / Unread** — Track important articles, auto-mark-on-open (toggleable), bulk star / mark-unread
 - 🔍 **Search & Filter** — Full-text search, filter by read state, source, AI status
-- 📦 **Categorization** — Custom categories with colors, drag-to-reorder
+- 📦 **Categorization** — Custom categories with colors, ordering
 - 🌗 **Theme Aware** — Follows SiYuan's light/dark mode
 
 ### 🤖 AI-Powered (user-provided)
-- 🧠 **Multiple Providers** — OpenAI, Anthropic, DeepSeek, Zhipu GLM, Ollama, any OpenAI-compatible
-- 📝 **One-Click Actions** — Summarize, translate, extract key points, action items, mind map, smart tags
+- 🧠 **Multiple Providers** — OpenAI, Anthropic, DeepSeek, Zhipu GLM, Ollama, any OpenAI-compatible endpoint
+- 📝 **One-Click Actions** — Streaming summary, streaming translation (structure-preserving), AI daily digest
 - 💡 **Custom Prompts** — Write your own prompt templates with `{{title}} {{content}}` variables
-- 🗞 **Daily Digest** — Group multiple articles into a thematic briefing
+- 🗞 **Daily Digest** — Two-stage pipeline: metadata panorama scan + deep-dive on key articles (per-article truncation configurable)
 - 📊 **Token Usage Tracking** — See how much you've spent
 - ⚡ **Result Caching** — Same article + same prompt = no double-spend
 
@@ -28,6 +29,20 @@
 - 🖼 **Image Localization** — Download remote images to local assets
 - 📋 **Multiple Notebooks** — Choose where to save each article
 - 📑 **Template System** — Customize output format with variables
+
+### ⌨️ Keyboard Shortcuts
+Active only when the LimitRSS panel has focus (ignored while typing in inputs or when a dialog is open).
+| Key | Action |
+|---|---|
+| `J` / `K` | Next / Previous article |
+| `M` | Toggle read/unread |
+| `S` | Toggle star |
+| `O` | Open original article |
+| `R` | Refresh subscriptions |
+| `I` | Toggle AI summary panel |
+| `?` | Show shortcut help |
+| `⌘/Ctrl + S` | Save current article to SiYuan |
+| `⌘/Ctrl + F` | Focus search box |
 
 ## 🚀 Installation
 

@@ -374,6 +374,8 @@ function renderReading(main: HTMLElement, s: Storage) {
     wrap.appendChild(sectionTitle("阅读"));
     wrap.appendChild(formRow("已读文章变淡", switchInput(reading.fadeReadArticles !== false, (v) => updateReading({ fadeReadArticles: v }))));
     wrap.appendChild(el("div", { class: "ar-form__hint" }, ["开启后，文章列表里的已读文章会降低对比度。"]));
+    wrap.appendChild(formRow("打开文章自动标记已读", switchInput(reading.autoMarkReadOnOpen !== false, (v) => updateReading({ autoMarkReadOnOpen: v }))));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["开启后，点开文章即自动标为已读；关闭后可在列表/阅读器手动标记。"]));
     wrap.appendChild(formRow("边界滚动切换文章", switchInput(reading.boundaryScrollSwitch !== false, (v) => updateReading({ boundaryScrollSwitch: v }))));
     wrap.appendChild(el("div", { class: "ar-form__hint" }, ["开启后，阅读到顶部继续上滑切换上一篇，阅读到底部继续下滑切换下一篇。"]));
     main.appendChild(wrap);
@@ -839,6 +841,7 @@ function renderAbout(main: HTMLElement) {
             ["fileText", "AI 流式总结 / 翻译 / 日报（深读正文可截断）"],
             ["save", "一键保存到思源，远程图片可本地化"],
             ["palette", "跟随思源主题，深色模式原生支持"],
+            ["keyboard", "阅读快捷键（J/K/M/S/O/R/I/?）"],
         ].map(([ic, t]) => el("li", {}, [iconLabel(ic as string, t as string, 13)]))),
         el("hr"),
         el("p", {}, [iconLabel("shield", "API Key 仅存储在本地工作空间。", 13)]),

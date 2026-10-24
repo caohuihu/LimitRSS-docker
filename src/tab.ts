@@ -10,7 +10,7 @@ import { Storage, ArticleStats } from "./storage";
 import { AIService } from "./ai";
 import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category, DailyReportSettings } from "./types";
 import { DEFAULT_DAILY_REPORT, articleSetHash, buildDeepDiveBatches, buildDeepDivePrompt, buildPanoramaPrompt, composeFinalReport, mapChunkCitations, normalizeDeepBatchMarkdown, runWithConcurrency, selectTopArticles, splitPanoramaArticles, stripCitationMarkers, stripSelectionSection, type DeepBatchResult, type DeepDiveArticle } from "./dailyReportCore";
-import { fetchAndParse, resolveSubscriptionFavicon, listRSSHubInstances, normalizeRSSHubBaseUrl, ParsedFeed } from "./fetcher";
+import { fetchAndParse, resolveSubscriptionFavicon, listRSSHubInstances, normalizeRSSHubBaseUrl, ParsedFeed, discoverFeedUrl } from "./fetcher";
 import { fetchFullText } from "./fulltext";
 import { renderFolderTemplate, saveMarkdownToSiyuan, saveToSiyuan } from "./save";
 import { openFaviconDialog } from "./favicon";
@@ -561,6 +561,24 @@ class Sidebar {
             el("label", { class: "ar-form__label" }, ["图标预览"]),
             el("div", { class: "ar-add-preview__row" }, [previewIcon, previewUrl]),
         ]);
+        /** 抓取 feed；失败且输入是站点主页时自动探测 feed，命中后回填 URL 输入框 */
+        const resolveFeed = async (url: string): Promise<{ feed: ParsedFeed; discoveredFrom?: string }> => {
+            const general = this.storage.getSettings().general;
+            try {
+                return { feed: await fetchAndParse(url, general.rsshubBaseUrl) };
+            } catch (e) {
+                const looksLikeFeed = /\.xml?(\?|$)/i.test(url) || /\/(feeds?|rss|atom|xml)(\/|$|\?)/i.test(url);
+                if (/^https?:\/\//i.test(url) && !looksLikeFeed) {
+                    resultEl.textContent = "直接抓取失败，正在自动探测站点 feed（约需十几秒）…";
+                    const found = await discoverFeedUrl(url, general.rsshubBaseUrl);
+                    if (found) {
+                        urlInput.value = found;
+                        return { feed: await fetchAndParse(found, general.rsshubBaseUrl), discoveredFrom: url };
+                    }
+                }
+                throw e;
+            }
+        };
         const test = async () => {
             const url = urlInput.value.trim();
             if (!url) return toast("请先填写 URL", "warn");
@@ -568,14 +586,15 @@ class Sidebar {
             previewIcon.style.display = "none";
             previewUrl.textContent = "(解析中…)";
             try {
-                const f = isRSSHubUrl()
-                    ? await testRSSHubInstances()
-                    : await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
+                const r = isRSSHubUrl()
+                    ? { feed: await testRSSHubInstances(), discoveredFrom: undefined as string | undefined }
+                    : await resolveFeed(url);
+                const f = r.feed;
                 if (!f) throw new Error("没有可用的 RSSHub 实例，请在设置中添加自定义实例");
                 if (!nameInput.value) nameInput.value = f.title;
                 if (f.siteUrl) urlInput.dataset.siteUrl = f.siteUrl;
                 if (f.description) urlInput.dataset.description = f.description;
-                resultEl.textContent = `✓ 抓取成功：${f.title}（${f.articles.length} 篇）`;
+                resultEl.textContent = `✓ 抓取成功：${f.title}（${f.articles.length} 篇）` + (r.discoveredFrom ? ` · 自动发现 feed：${urlInput.value}` : "");
                 // 异步解析图标，让用户立刻看到抓取结果；icon 解析完后回填预览
                 const faviconInfo = await resolveSubscriptionFavicon({
                     feedFavicon: f.favicon,
@@ -609,9 +628,11 @@ class Sidebar {
         });
         urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") test(); });
         const doSave = async () => {
-            const url = urlInput.value.trim();
-            if (!url) return toast("请填写 URL", "warn");
+            const siteUrl = urlInput.value.trim();
+            if (!siteUrl) return toast("请填写 URL", "warn");
+            let url = siteUrl;
             let parsed: Awaited<ReturnType<typeof fetchAndParse>> | undefined;
+            let discoveredFrom: string | undefined;
             try {
                 if (isRSSHubUrl()) {
                     parsed = instanceResults.get(selectedInstance)?.feed || await testRSSHubInstances();
@@ -619,24 +640,29 @@ class Sidebar {
                     const general = this.storage.getSettings().general;
                     this.storage.updateSettings({ general: { ...general, rsshubBaseUrl: selectedInstance } });
                 } else {
-                    parsed = await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
+                    const r = await resolveFeed(url);
+                    parsed = r.feed;
+                    discoveredFrom = r.discoveredFrom;
+                    url = urlInput.value.trim(); // 自动发现后以 feed URL 入库
                 }
             } catch (e) {
                 return toast("订阅源不可用：" + (e as Error).message, "error", 4000);
             }
             const name = nameInput.value.trim() || parsed.title || url;
+            // 自动发现场景：图标按原站点（discoveredFrom）解析，而不是 feed 路径
+            const faviconSiteUrl = parsed.siteUrl || urlInput.dataset.siteUrl || discoveredFrom || url;
             const faviconInfo = await resolveSubscriptionFavicon({
                 feedFavicon: parsed.favicon || urlInput.dataset.favicon,
-                siteUrl: parsed.siteUrl || urlInput.dataset.siteUrl || url,
+                siteUrl: faviconSiteUrl,
                 always: true,
             });
             const s: Subscription = {
                 id: genId("sub_"), url, name, enabled: true, errorCount: 0,
                 categoryId: categoryId && categoryId !== "c_default" ? categoryId : undefined,
                 categoryName: categoryId && categoryId !== "c_default" ? this.storage.getCats().find((c) => c.id === categoryId)?.name : undefined,
-                siteUrl: parsed.siteUrl || urlInput.dataset.siteUrl,
+                siteUrl: faviconSiteUrl,
                 description: parsed.description || urlInput.dataset.description,
-                favicon: faviconInfo.favicon || fallbackFavicon(parsed.siteUrl || url),
+                favicon: faviconInfo.favicon || fallbackFavicon(faviconSiteUrl),
                 faviconTriedAt: faviconInfo.attempted ? faviconInfo.triedAt : undefined,
                 sortOrder: this.storage.getSubs().length, createdAt: Date.now(), updatedAt: Date.now(),
             };
@@ -650,7 +676,7 @@ class Sidebar {
             width: "480px",
             content: el("div", {}, [
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["RSS / URL *"]), urlInput]),
-                el("div", { class: "ar-form__hint" }, ["支持普通 RSS / Atom 地址，以及 Folo 使用的 rsshub:// 路由格式。"]),
+                el("div", { class: "ar-form__hint" }, ["支持 RSS / Atom 地址与 rsshub:// 路由；直接粘贴站点主页（如 https://example.com）会自动探测其 feed。"]),
                 rsshubPanel,
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["显示名称"]), nameInput]),
                 resultEl,
@@ -1662,6 +1688,21 @@ class ArticleListView {
             el("div", { class: "ar-list__header-actions" }, [
                 this.renderDockBack?.() || null,
                 button({ variant: "icon", icon: "check", title: unreadIds.length ? `将当前列表 ${unreadIds.length} 篇标为已读` : "当前列表没有未读文章", disabled: unreadIds.length === 0, onclick: () => this.onMarkRead(unreadIds) }),
+                button({
+                    variant: "icon", icon: "more", title: "批量操作",
+                    onclick: (e) => {
+                        e.stopPropagation();
+                        const allIds = articles.map((a) => a.id);
+                        const starred = articles.filter((a) => a.isStarred);
+                        const menu = (target: HTMLElement) => dropdown(target, [
+                            { label: `星标全部（${allIds.length}）`, icon: "star", disabled: allIds.length === 0, onClick: () => { this.storage.markStar(allIds, true); toast(`已星标 ${allIds.length} 篇`, "success"); } },
+                            { label: `取消星标（${starred.length}）`, icon: "star", disabled: starred.length === 0, onClick: () => { this.storage.markStar(allIds, false); toast(`已取消 ${starred.length} 篇星标`, "success"); } },
+                            { divider: true, label: "" },
+                            { label: `全部标为未读（${unreadIds.length}）`, icon: "bell", disabled: unreadIds.length === 0, onClick: () => { this.storage.markRead(unreadIds, false); toast(`已将 ${unreadIds.length} 篇标为未读`, "success"); } },
+                        ]);
+                        menu(e.currentTarget as HTMLElement);
+                    },
+                }),
                 button({ variant: "icon", icon: "refresh", title: this.refreshStatus === "refreshing" ? "正在刷新" : "刷新", disabled: this.refreshStatus === "refreshing", className: this.refreshStatus === "refreshing" ? "ar-list__refresh-btn--spinning" : "", onclick: () => this.onRefresh() }),
             ]),
         ]);
@@ -2580,6 +2621,25 @@ class Reader {
         c.appendChild(stage);
     }
 
+    /** 快捷键 ⌘/Ctrl+S：保存当前文章到思源（与工具栏保存按钮同一逻辑） */
+    saveCurrent() {
+        const a = this.current;
+        if (!a) return;
+        const latest = this.storage.getArticle(a.id) || a;
+        saveToSiyuan(latest, this.storage.getSettings(), latest.aiResults || {}, this.storage.getSub(latest.subscriptionId), this.savePathMemory())
+            .then((id) => { if (id) this.storage.setSaved(latest.id, id); });
+    }
+
+    /** 快捷键 I：切换 AI 总结面板 */
+    toggleSummaryPanel(a: Article) {
+        if (this.summaryVisible) {
+            this.summaryVisible = false;
+            this.render();
+        } else {
+            this.showInlinePrompt(a, SUMMARY_PROMPT);
+        }
+    }
+
     showInlinePrompt(a: Article, prompt: PromptTemplate) {
         this.mode = "article";
         if (prompt.id === SUMMARY_PROMPT.id) this.summaryVisible = true;
@@ -3034,6 +3094,9 @@ function mdToHtml(md: string): string {
 
 // =============== 主 Tab ===============
 
+/** 跨实例订阅刷新锁：完整版与 dock 同时打开时，同一源同一时间只允许一个在途请求 */
+const inFlightFeeds = new Set<string>();
+
 export class RssTab {
     root: HTMLElement;
     storage: Storage;
@@ -3092,7 +3155,7 @@ export class RssTab {
         const openArticle = (id: string, options: { centerInList?: boolean } = {}) => {
             const article = this.storage.getArticle(id) || null;
             this.reader.showArticle(article);
-            if (article && !article.isRead) this.storage.setRead(article.id, true);
+            if (article && !article.isRead && this.storage.getSettings().reading.autoMarkReadOnOpen !== false) this.storage.setRead(article.id, true);
             this.list.setActiveArticle(id, { center: options.centerInList });
             if (this.isDock) this.switchDockView("reader");
         };
@@ -3108,7 +3171,7 @@ export class RssTab {
                 return;
             }
             this.reader.showArticleFromDaily(id);
-            if (!article.isRead) this.storage.setRead(article.id, true);
+            if (!article.isRead && this.storage.getSettings().reading.autoMarkReadOnOpen !== false) this.storage.setRead(article.id, true);
         };
         this.list = new ArticleListView(
             listEl,
@@ -3171,6 +3234,87 @@ export class RssTab {
             const t = (ev.target as HTMLElement)?.closest?.(".ar-rd__table-scroll, .ar-rd__body pre");
             if (t && t.scrollWidth > t.clientWidth + 2) ev.stopPropagation();
         }, { passive: true });
+
+        // 阅读快捷键（仅当按键发生在本面板内时生效；弹窗/输入框打开时不拦截）
+        this.root.addEventListener("keydown", this.onKey, true);
+    }
+
+    /** 阅读快捷键：J/K 上下篇、M 已读、S 星标、O 原文、R 刷新、I AI 总结、? 帮助、⌘/Ctrl+S 保存、⌘/Ctrl+F 搜索 */
+    private onKey = (ev: KeyboardEvent) => {
+        const target = ev.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+        if (document.querySelector(".ar-modal__backdrop")) return;
+        const mod = ev.metaKey || ev.ctrlKey;
+        const key = ev.key;
+        if (mod) {
+            if (key.toLowerCase() === "s") {
+                ev.preventDefault();
+                if (this.reader.current) this.reader.saveCurrent();
+                return;
+            }
+            if (key.toLowerCase() === "f") {
+                ev.preventDefault();
+                const search = this.listEl.querySelector<HTMLInputElement>(".ar-list__search");
+                if (search) { search.focus({ preventScroll: true }); search.select(); }
+                return;
+            }
+            return;
+        }
+        if (key.length !== 1 && key !== "?") return;
+        const current = this.reader.current;
+        switch (key.toLowerCase()) {
+            case "j":
+                if (current) { ev.preventDefault(); this.reader.onNavigateArticle(current.id, "next"); }
+                return;
+            case "k":
+                if (current) { ev.preventDefault(); this.reader.onNavigateArticle(current.id, "prev"); }
+                return;
+            case "m":
+                if (current) { ev.preventDefault(); this.storage.setRead(current.id, !current.isRead); }
+                return;
+            case "s":
+                if (current) { ev.preventDefault(); this.storage.setStar(current.id, !current.isStarred); }
+                return;
+            case "o":
+                if (current?.link) window.open(current.link, "_blank", "noopener");
+                return;
+            case "r":
+                this.refreshAll({ silent: true });
+                return;
+            case "i":
+                if (current) { ev.preventDefault(); this.reader.toggleSummaryPanel(current); }
+                return;
+            case "?":
+                this.showShortcutHelp();
+                return;
+            default:
+                return;
+        }
+    };
+
+    /** 快捷键帮助 */
+    private showShortcutHelp() {
+        const rows: [string, string][] = [
+            ["J / K", "下一篇 / 上一篇"],
+            ["M", "切换已读 / 未读"],
+            ["S", "切换星标"],
+            ["O", "打开原文"],
+            ["R", "刷新订阅"],
+            ["I", "切换 AI 总结面板"],
+            ["?", "显示本帮助"],
+            ["⌘/Ctrl + S", "保存当前文章到思源"],
+            ["⌘/Ctrl + F", "聚焦搜索框"],
+        ];
+        const list = el("div", { class: "ar-shortcut-list" }, rows.map(([k, d]) =>
+            el("div", { class: "ar-shortcut-row" }, [
+                el("kbd", { class: "ar-shortcut-key" }, [k]),
+                el("span", { class: "ar-shortcut-desc" }, [d]),
+            ]),
+        ));
+        modal({ title: "阅读快捷键", width: "380px", content: el("div", {}, [
+            el("div", { class: "ar-form__hint" }, ["仅在 LimitRSS 面板获得焦点时生效；输入框与弹窗打开时不拦截。"]),
+            list,
+        ]) });
     }
 
     destroy() {
@@ -3180,6 +3324,7 @@ export class RssTab {
         this.autoRefreshTimer = undefined;
         this.refreshInterval = undefined;
         this.refreshDoneTimer = undefined;
+        this.root.removeEventListener("keydown", this.onKey, true);
         this.faviconJobs.clear();
         this.sidebar?.destroy();
         this.list?.destroy();
@@ -3294,29 +3439,36 @@ export class RssTab {
         const workers = Array.from({ length: workerCount }, async () => {
             while (index < total) {
                 const sub = subs[index++];
+                // 跨实例锁：该源已被其它实例（如完整版 + dock）在刷，本次跳过避免重复请求
+                const locked = inFlightFeeds.has(sub.url);
+                if (!locked) inFlightFeeds.add(sub.url);
                 try {
-                    const f = await fetchAndParse(sub.url, this.storage.getSettings().general.rsshubBaseUrl);
-                    if (!this.storage.getSub(sub.id)) continue;
-                    f.articles.filter((a) => a.link).forEach((a) => {
-                        allArticles.push({
-                            id: articleId(sub.id, a.link),
-                            subscriptionId: sub.id,
-                            title: a.title, link: a.link, author: a.author,
-                            pubDate: a.pubDate, fetchedAt: Date.now(),
-                            content: a.content, description: a.description, thumbnail: a.thumbnail,
+                    if (locked) {
+                        // 保持进度计数，不做网络请求
+                    } else {
+                        const f = await fetchAndParse(sub.url, this.storage.getSettings().general.rsshubBaseUrl);
+                        if (!this.storage.getSub(sub.id)) continue;
+                        f.articles.filter((a) => a.link).forEach((a) => {
+                            allArticles.push({
+                                id: articleId(sub.id, a.link),
+                                subscriptionId: sub.id,
+                                title: a.title, link: a.link, author: a.author,
+                                pubDate: a.pubDate, fetchedAt: Date.now(),
+                                content: a.content, description: a.description, thumbnail: a.thumbnail,
+                            });
                         });
-                    });
-                    const faviconPatch: Partial<Subscription> = {
-                        siteUrl: f.siteUrl || sub.siteUrl,
-                        description: f.description || sub.description,
-                        lastFetchAt: Date.now(),
-                        lastError: undefined,
-                        errorCount: 0,
-                    };
-                    metaPatches.push({ id: sub.id, patch: faviconPatch });
-                    // favicon 解析（图片探活/站点首页抓取，最坏可各耗 ~20s）改为后台 fire-and-forget，
-                    // 不阻塞刷新进度；结果出来后单独 patchSubsMeta 回写
-                    if (!sub.customFavicon) this.resolveFaviconInBackground(sub.id, f);
+                        const faviconPatch: Partial<Subscription> = {
+                            siteUrl: f.siteUrl || sub.siteUrl,
+                            description: f.description || sub.description,
+                            lastFetchAt: Date.now(),
+                            lastError: undefined,
+                            errorCount: 0,
+                        };
+                        metaPatches.push({ id: sub.id, patch: faviconPatch });
+                        // favicon 解析（图片探活/站点首页抓取，最坏可各耗 ~20s）改为后台 fire-and-forget，
+                        // 不阻塞刷新进度；结果出来后单独 patchSubsMeta 回写
+                        if (!sub.customFavicon) this.resolveFaviconInBackground(sub.id, f);
+                    }
                 } catch (e) {
                     const latest = this.storage.getSub(sub.id);
                     if (latest) {
@@ -3327,6 +3479,7 @@ export class RssTab {
                         } });
                     }
                 } finally {
+                    if (!locked) inFlightFeeds.delete(sub.url);
                     done++;
                     const now = Date.now();
                     if (done === total || now - lastProgressAt > 400) {

@@ -213,6 +213,65 @@ export function parseXML(xml: string, sourceUrl: string): ParsedFeed {
     return { title, siteUrl: siteUrl || sourceUrl, description, favicon, articles };
 }
 
+/** 站点首页探测的常见 feed 路径 */
+const COMMON_FEED_PATHS = [
+    "/feed", "/feed.xml", "/rss", "/rss.xml", "/rss/",
+    "/atom.xml", "/feed/atom.xml", "/feeds/posts.xml", "/index.xml", "/latest/rss",
+];
+
+/** 单个候选 feed 的探测超时（发现流程最多探 8 个候选） */
+const DISCOVER_CANDIDATE_MS = 8_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`${what} 超时`)), ms);
+        p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+    });
+}
+
+/** 从站点 URL 自动发现 feed：
+ *   1) 抓首页，读 <link rel="alternate" type="application/rss+xml|atom+xml">
+ *   2) 依次试常见 feed 路径
+ * 返回第一个能解析出文章的 feed URL；找不到返回 undefined。
+ */
+export async function discoverFeedUrl(siteUrl: string, rsshubBaseUrl?: string): Promise<string | undefined> {
+    let origin = "";
+    try {
+        const u = new URL(siteUrl);
+        if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
+        origin = u.origin;
+    } catch { return undefined; }
+
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+    const push = (u: string | undefined) => {
+        if (!u) return;
+        try { const abs = new URL(u, origin + "/").href; if (!seen.has(abs)) { seen.add(abs); candidates.push(abs); } } catch { /* */ }
+    };
+
+    // 1) 首页 HTML 里的 <link rel=alternate>
+    const homeHtml = await withTimeout(fetchSiteHomeHtml(origin + "/"), 8_000, "首页抓取").catch(() => undefined as string | undefined);
+    if (homeHtml) {
+        try {
+            const doc = new DOMParser().parseFromString(homeHtml, "text/html");
+            doc.querySelectorAll('link[rel~="alternate"]').forEach((l) => {
+                const type = (l.getAttribute("type") || "").toLowerCase();
+                if (type.includes("rss") || type.includes("atom")) push(l.getAttribute("href"));
+            });
+        } catch { /* */ }
+    }
+    // 2) 常见路径
+    COMMON_FEED_PATHS.forEach((p) => push(origin + p));
+
+    for (const candidate of candidates.slice(0, 8)) {
+        try {
+            const feed = await withTimeout(fetchAndParse(candidate, rsshubBaseUrl), DISCOVER_CANDIDATE_MS, "feed 探测");
+            if (feed.articles.length > 0) return candidate;
+        } catch { /* 试下一个 */ }
+    }
+    return undefined;
+}
+
 export async function fetchAndParse(url: string, rsshubBaseUrl?: string): Promise<ParsedFeed> {
     const requestUrl = resolveFeedUrl(url, rsshubBaseUrl);
     const xml = await fetchXML(requestUrl);

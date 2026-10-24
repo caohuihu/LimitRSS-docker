@@ -114,7 +114,7 @@ export interface AISettings {
 export interface Settings {
     general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; rsshubCustomInstances?: string[]; entryPosition?: "topbar-right" | "topbar-left" | "dock-left-top" | "dock-right-top" | "hidden"; };
     display: { fontSize: number; lineHeight: number; theme: string; };
-    reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; selection?: { copy?: boolean; translate?: boolean; search?: boolean; customUrl?: string; }; };
+    reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; /** 打开文章时自动标记已读（默认开） */ autoMarkReadOnOpen?: boolean; selection?: { copy?: boolean; translate?: boolean; search?: boolean; customUrl?: string; }; };
     save: { template: string; includeSourceLink: boolean; downloadImages: boolean; cleanLinks?: boolean; defaultNotebook?: string; folderTemplate?: string; pathsByNotebook?: Record<string, string>; };
 }
 
@@ -169,7 +169,7 @@ export const DEFAULT_PROMPTS: PromptTemplate[] = [
 export const DEFAULT_SETTINGS: Settings = {
     general: { language: "auto", articlesPerPage: 30, autoRefresh: 30, fullText: true, articleRetentionDays: 7, rsshubBaseUrl: "https://rsshub.app" },
     display: { fontSize: 15, lineHeight: 1.7, theme: "auto" },
-    reading: { fadeReadArticles: true, boundaryScrollSwitch: true, boundaryConfirmDelayMs: 120, boundaryCooldownMs: 700, boundaryTriggerDistance: 95 },
+    reading: { fadeReadArticles: true, boundaryScrollSwitch: true, boundaryConfirmDelayMs: 120, boundaryCooldownMs: 700, boundaryTriggerDistance: 95, autoMarkReadOnOpen: true },
     save: {
         template: "# {{title}}\n\n> {{source}} · {{date}} · [原文]({{link}})\n\n{{content}}",
         includeSourceLink: true, downloadImages: true,
