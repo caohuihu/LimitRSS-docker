@@ -2771,59 +2771,6 @@ class Reader {
         return card;
     }
 
-    async runPrompt(a: Article, promptId: string) {
-        const providers = this.ai.providers();
-        if (!providers.length) return toast("请先在设置中配置 AI 提供商", "error", 5000);
-
-        // 创建 streaming 卡片
-        const resultsArea = this.contentArea?.querySelector(".ar-rd__ai-results") as HTMLElement | null;
-        if (!resultsArea) {
-            const newArea = el("div", { class: "ar-rd__ai-results" });
-            this.contentArea?.appendChild(newArea);
-        }
-        const target = (this.contentArea?.querySelector(".ar-rd__ai-results") as HTMLElement) || el("div");
-        const tpl = this.ai.getPrompt(promptId);
-        if (!tpl) return;
-
-        const card = el("div", { class: "ar-rd__ai-card ar-rd__ai-card--stream" }, [
-            el("div", { class: "ar-rd__ai-card-head" }, [
-                el("span", {}, [makeIcon(tpl.icon || "sparkle", 14)]),
-                el("span", {}, [tpl.name]),
-                el("span", { style: { flex: "1" } }),
-                el("span", { class: "ar-rd__ai-streaming" }, [spinner(12), " 生成中…"]),
-            ]),
-            el("div", { class: "ar-rd__ai-card-body" }, []),
-        ]);
-        target.insertBefore(card, target.firstChild);
-        const body = card.querySelector(".ar-rd__ai-card-body") as HTMLElement;
-        const head = card.querySelector(".ar-rd__ai-card-head") as HTMLElement;
-
-        try {
-            let full = "";
-            const r = await this.ai.stream(a, promptId, {
-                onChunk: (chunk) => {
-                    full += chunk;
-                    body.innerHTML = mdToHtml(full);
-                },
-                onDone: async (final) => {
-                    body.innerHTML = mdToHtml(final);
-                    head.querySelector(".ar-rd__ai-streaming")?.remove();
-                    a.aiResults = a.aiResults || {};
-                    a.aiResults[promptId] = r;
-                    await this.storage.setAIResult(a.id, promptId, r);
-                },
-                onError: (err) => {
-                    head.querySelector(".ar-rd__ai-streaming")?.remove();
-                    body.innerHTML = `<div style="color: var(--ar-error)">${escapeHtml(err.message)}</div>`;
-                    toast("AI 调用失败：" + err.message, "error", 5000);
-                },
-            });
-        } catch (e) {
-            head.querySelector(".ar-rd__ai-streaming")?.remove();
-            body.innerHTML = `<div style="color: var(--ar-error)">${escapeHtml((e as Error).message)}</div>`;
-        }
-    }
-
     async runQuickPrompt(a: Article, prompt: PromptTemplate) {
         const providers = this.ai.providers();
         if (!providers.length) return toast("请先在设置中配置 AI 提供商", "error", 5000);
@@ -2872,15 +2819,12 @@ class Reader {
                     full += chunk;
                     body.innerHTML = mdToHtml(full);
                 },
-                onDone: async (final) => {
-                    body.innerHTML = mdToHtml(final);
+                // onDone 会在 streamTemplate 的 Promise resolve 之前被调用（内部同步收尾），
+                // 此时 r 尚处于 TDZ——凡引用 r 的写入统一放到下方 await 之后执行。
+                onDone: (final) => {
+                    body.innerHTML = mdToHtml(final || full);
                     head.querySelector(".ar-rd__ai-streaming")?.remove();
                     stopBtn.remove();
-                    this.aiAbort = null;
-                    a.aiResults = a.aiResults || {};
-                    a.aiResults[prompt.id] = r;
-                    await this.storage.setAIResult(a.id, prompt.id, r);
-                    this.render();
                 },
                 onError: (err) => {
                     head.querySelector(".ar-rd__ai-streaming")?.remove();
@@ -2896,6 +2840,11 @@ class Reader {
                 },
                 signal: abort.signal,
             });
+            this.aiAbort = null;
+            a.aiResults = a.aiResults || {};
+            a.aiResults[prompt.id] = r;
+            await this.storage.setAIResult(a.id, prompt.id, r);
+            this.render();
         } catch (e) {
             head.querySelector(".ar-rd__ai-streaming")?.remove();
             stopBtn.remove();

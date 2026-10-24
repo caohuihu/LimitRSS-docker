@@ -1,5 +1,29 @@
 # CHANGELOG.md
 
+## [v0.2.7] 2026-10-25
+
+### 中文说明
+
+#### 修复（Fixed）
+
+- **AI 总结生成后未真正保存（保存对话框里没有"AI 总结"选项）**：流式接口的 `onDone` 在 Promise 完成前触发，内部引用了尚未初始化的结果变量（TDZ ReferenceError，即日志里的 `Cannot access 'a' before initialization`），导致总结只显示在卡片上、从未写入存储。现在保存操作在 `await` 完成后执行，生成即持久化；翻译流程原本正确，不受影响。
+
+#### 改进（Improved）
+
+- **浏览器 https 模式跨域请求改走内核 API 代理**：`siyuan.api.forwardProxy` 可能触发浏览器端 fetch，访问 `http://` 端点（如局域网 AI 服务）产生 Mixed Content 告警；现在 https 页面直接用内核服务端抓取的 `fetchSyncPost("/api/network/forwardProxy")`，消除告警。http/Electron 环境保持原顺序不变。
+- **清理未使用的 `runPrompt` 旧代码**（60 行死代码）。
+
+### English
+
+#### Fixed
+
+- **AI summary was displayed but never persisted** (no "AI summary" option in the save dialog): the stream callback `onDone` fires before the promise resolves and referenced the not-yet-initialized result variable (TDZ `ReferenceError: Cannot access ... before initialization`), so the result stayed in the card but was never written to storage. Persistence now happens after the `await`; translation was already correct.
+
+#### Improved
+
+- **Browser HTTPS mode now proxies cross-origin requests via the kernel API**: `siyuan.api.forwardProxy` can trigger a browser-side fetch that warns Mixed Content for `http://` endpoints (e.g. LAN AI servers); HTTPS pages now use the kernel-side `fetchSyncPost("/api/network/forwardProxy")` directly.
+- **Removed unused legacy `runPrompt` code**.
+
 ## [v0.2.6] 2026-10-25
 
 ### 中文说明
