@@ -1,6 +1,6 @@
 # LimitRSS · 思源笔记 AI RSS 阅读器
 
-#只为修复在浏览器无法使用ai的问题
+# 最初的目的只为修复在浏览器无法使用ai的问题
 
 修复：CORS的全局取指截获器（遵循参考插件模式）。所有跨源请求现在都经过思渊 /api/network/forwardProxy。
 
