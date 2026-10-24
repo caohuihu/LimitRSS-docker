@@ -36,6 +36,7 @@ jobs:
           path: package.zip
 
       - name: Resolve release notes
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           NOTES="RELEASE_NOTES_v${{ steps.version.outputs.version }}.md"
@@ -49,13 +50,15 @@ jobs:
               f {print}
             ' CHANGELOG.md > .release-notes-body.md
           fi
-          echo "notes file ready: $(wc -l < .release-notes-body.md) lines"
+          echo "notes ready: $(wc -l < .release-notes-body.md) lines"
 
       - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
           name: "LimitRSS v${{ steps.version.outputs.version }}"
-          file_from: .release-notes-body.md
+          body_path: .release-notes-body.md
+          files: package.zip
           draft: false
           prerelease: false
